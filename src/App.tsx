@@ -1,10 +1,12 @@
 import { useState } from 'react';
-import { TrendingUp, Eye, BarChart2, PieChart, BookOpen } from 'lucide-react';
+import { TrendingUp, Eye, BarChart2, PieChart, BookOpen, ClipboardList, Download } from 'lucide-react';
 import SwingScorecard from './components/tabs/SwingScorecard';
 import WatchList from './components/tabs/WatchList';
 import TechnicalSetup from './components/tabs/TechnicalSetup';
 import PortfolioRisk from './components/tabs/PortfolioRisk';
 import Fundamentals from './components/tabs/Fundamentals';
+import TradeJournal from './components/tabs/TradeJournal';
+import { importSeedData } from './data/seedData';
 
 const TABS = [
   { id: 'scorecard', label: 'Swing Scorecard', icon: TrendingUp },
@@ -12,12 +14,24 @@ const TABS = [
   { id: 'technical', label: 'Technical Setup', icon: BarChart2 },
   { id: 'portfolio', label: 'Portfolio Risk', icon: PieChart },
   { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
+  { id: 'journal', label: 'Trade Journal', icon: ClipboardList },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('scorecard');
+  const [importing, setImporting] = useState(false);
+
+  async function handleImport() {
+    setImporting(true);
+    try {
+      await importSeedData();
+      alert('Portfolio data imported! Refresh the tab to see it.');
+    } finally {
+      setImporting(false);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -29,7 +43,17 @@ export default function App() {
               <TrendingUp size={16} className="text-white" />
             </div>
             <h1 className="text-base font-semibold text-zinc-100">Swing Trading Dashboard</h1>
-            <span className="ml-auto text-xs text-zinc-600">Powered by Finnhub</span>
+            <button
+              onClick={handleImport}
+              disabled={importing}
+              className="ml-auto flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
+              title="Import portfolio seed data from Excel"
+            >
+              <Download size={12} />
+              {importing ? 'Importing…' : 'Import Data'}
+            </button>
+            <span className="text-xs text-zinc-700 mx-2">|</span>
+            <span className="text-xs text-zinc-600">Powered by Finnhub</span>
           </div>
           {/* Tab bar */}
           <nav className="flex gap-1 -mb-px overflow-x-auto">
@@ -58,6 +82,7 @@ export default function App() {
         {activeTab === 'technical' && <TechnicalSetup />}
         {activeTab === 'portfolio' && <PortfolioRisk />}
         {activeTab === 'fundamentals' && <Fundamentals />}
+        {activeTab === 'journal' && <TradeJournal />}
       </main>
     </div>
   );

@@ -27,12 +27,16 @@ create policy "public_access" on scorecard_entries for all using (true) with che
 -- 2. Watch list
 -- ─────────────────────────────────────────────────────────────────────────────
 create table if not exists watchlist (
-  id          uuid primary key default gen_random_uuid(),
-  ticker      text not null,
-  conviction  text not null check (conviction in ('HIGH','MEDIUM','LOW')),
-  notes       text,
-  added_at    timestamptz default now(),
-  created_at  timestamptz default now()
+  id              uuid primary key default gen_random_uuid(),
+  ticker          text not null,
+  conviction      text not null check (conviction in ('HIGH','MEDIUM','LOW')),
+  notes           text,
+  watch_price     numeric(10,2),
+  watch_date      date,
+  analyst_target  numeric(10,2),
+  target_entry    numeric(10,2),
+  added_at        timestamptz default now(),
+  created_at      timestamptz default now()
 );
 
 alter table watchlist enable row level security;
@@ -75,6 +79,8 @@ create table if not exists portfolio_holdings (
   shares          numeric(12,3) not null,
   avg_cost        numeric(10,2) not null,
   sector          text,
+  account         text check (account in ('Brokerage','RRSP','LIRA','TSFA','HSA','Other')),
+  currency        text check (currency in ('USD','CAD')),
   liquidity_risk  text not null check (liquidity_risk in ('LOW','MEDIUM','HIGH')),
   notes           text,
   created_at      timestamptz default now()
@@ -97,3 +103,37 @@ create table if not exists fundamental_notes (
 
 alter table fundamental_notes enable row level security;
 create policy "public_access" on fundamental_notes for all using (true) with check (true);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 6. Trade journal
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists trade_journal (
+  id                  uuid primary key default gen_random_uuid(),
+  sr_no               integer not null,
+  date_of_buy         date not null,
+  account             text check (account in ('Brokerage','RRSP','LIRA','TSFA','HSA','Other')),
+  ticker              text not null,
+  company             text,
+  industry            text,
+  period              text,
+  strategy            text,
+  currency            text check (currency in ('USD','CAD')),
+  qty                 numeric(12,3) not null,
+  entry_price         numeric(10,4) not null,
+  stop_loss           numeric(10,4),
+  position_size       numeric(14,2),
+  date_of_sale        date,
+  exit_qty            numeric(12,3),
+  exit_price          numeric(10,4),
+  net_qty             numeric(12,3) not null default 0,
+  avg_exit_price      numeric(10,4),
+  realized_pnl        numeric(14,2),
+  realized_pnl_pct    numeric(8,4),
+  win_loss            text check (win_loss in ('WIN','LOSS')),
+  status              text not null check (status in ('OPEN','CLOSED')) default 'OPEN',
+  notes               text,
+  created_at          timestamptz default now()
+);
+
+alter table trade_journal enable row level security;
+create policy "public_access" on trade_journal for all using (true) with check (true);

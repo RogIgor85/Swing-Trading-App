@@ -2,6 +2,8 @@ export type Verdict = 'GO' | 'CONDITIONAL' | 'NO GO';
 export type Conviction = 'HIGH' | 'MEDIUM' | 'LOW';
 export type TrendDirection = 'BULLISH' | 'BEARISH' | 'NEUTRAL';
 export type LiquidityRisk = 'LOW' | 'MEDIUM' | 'HIGH';
+export type Account = 'Brokerage' | 'RRSP' | 'LIRA' | 'TSFA' | 'HSA' | 'Other';
+export type Currency = 'USD' | 'CAD';
 
 export interface ScorecardEntry {
   id: string;
@@ -25,6 +27,8 @@ export interface WatchItem {
   notes: string;
   watch_price: number | null;
   watch_date: string;
+  analyst_target: number | null;
+  target_entry: number | null;
   added_at: string;
 }
 
@@ -56,6 +60,8 @@ export interface Holding {
   shares: number;
   avg_cost: number;
   sector: string;
+  account: Account;
+  currency: Currency;
   liquidity_risk: LiquidityRisk;
   notes: string;
   created_at: string;
@@ -70,15 +76,43 @@ export interface FundamentalNote {
   created_at: string;
 }
 
+export interface TradeJournalEntry {
+  id: string;
+  sr_no: number;
+  date_of_buy: string;
+  account: Account;
+  ticker: string;
+  company: string;
+  industry: string;
+  period: string;
+  strategy: string;
+  currency: Currency;
+  qty: number;
+  entry_price: number;
+  stop_loss: number | null;
+  position_size: number | null;
+  date_of_sale: string | null;
+  exit_qty: number | null;
+  exit_price: number | null;
+  net_qty: number;
+  avg_exit_price: number | null;
+  realized_pnl: number | null;
+  realized_pnl_pct: number | null;
+  win_loss: 'WIN' | 'LOSS' | null;
+  status: 'OPEN' | 'CLOSED';
+  notes: string;
+  created_at: string;
+}
+
 // Finnhub API response types
 export interface FinnhubQuote {
-  c: number;  // current price
-  d: number;  // change
-  dp: number; // % change
-  h: number;  // high
-  l: number;  // low
-  o: number;  // open
-  pc: number; // previous close
+  c: number;
+  d: number;
+  dp: number;
+  h: number;
+  l: number;
+  o: number;
+  pc: number;
 }
 
 export interface FinnhubProfile {

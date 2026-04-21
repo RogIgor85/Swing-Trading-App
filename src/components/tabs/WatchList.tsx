@@ -36,6 +36,8 @@ export default function WatchList() {
   const [notes, setNotes] = useState('');
   const [watchPrice, setWatchPrice] = useState('');
   const [watchDate, setWatchDate] = useState(new Date().toISOString().split('T')[0]);
+  const [analystTarget, setAnalystTarget] = useState('');
+  const [targetEntry, setTargetEntry] = useState('');
   const [adding, setAdding] = useState(false);
   const [fetchingPrice, setFetchingPrice] = useState(false);
   const [sortConviction, setSortConviction] = useState(true);
@@ -102,6 +104,8 @@ export default function WatchList() {
         notes,
         watch_price: price,
         watch_date: watchDate,
+        analyst_target: analystTarget ? parseFloat(analystTarget) : null,
+        target_entry: targetEntry ? parseFloat(targetEntry) : null,
         added_at: nowIso(),
       };
       await storage.insert(TABLE, item);
@@ -110,6 +114,8 @@ export default function WatchList() {
       setWatchPrice('');
       setWatchDate(new Date().toISOString().split('T')[0]);
       setConviction('MEDIUM');
+      setAnalystTarget('');
+      setTargetEntry('');
       await load();
     } finally {
       setAdding(false);
@@ -179,6 +185,28 @@ export default function WatchList() {
                 <option key={c} value={c}>{c}</option>
               ))}
             </select>
+          </div>
+          <div className="w-28">
+            <label className="label">Target Entry</label>
+            <input
+              className="input-base"
+              type="number"
+              step="0.01"
+              placeholder="e.g. 145.00"
+              value={targetEntry}
+              onChange={(e) => setTargetEntry(e.target.value)}
+            />
+          </div>
+          <div className="w-28">
+            <label className="label">Analyst Target</label>
+            <input
+              className="input-base"
+              type="number"
+              step="0.01"
+              placeholder="e.g. 200.00"
+              value={analystTarget}
+              onChange={(e) => setAnalystTarget(e.target.value)}
+            />
           </div>
           <div className="flex-1 min-w-40">
             <label className="label">Notes</label>
@@ -347,6 +375,24 @@ export default function WatchList() {
                             style={{ width: `${sent.sentiment.bullishPercent * 100}%` }}
                           />
                         </div>
+                      </div>
+                    )}
+
+                    {/* Target entry / analyst target */}
+                    {(item.target_entry || item.analyst_target) && (
+                      <div className="hidden sm:flex flex-col gap-1 text-xs flex-shrink-0">
+                        {item.target_entry && (
+                          <div>
+                            <span className="text-zinc-600">Entry: </span>
+                            <span className="text-amber-400 font-mono">{fmtCurrency(item.target_entry)}</span>
+                          </div>
+                        )}
+                        {item.analyst_target && (
+                          <div>
+                            <span className="text-zinc-600">PT: </span>
+                            <span className="text-blue-400 font-mono">{fmtCurrency(item.analyst_target)}</span>
+                          </div>
+                        )}
                       </div>
                     )}
 
