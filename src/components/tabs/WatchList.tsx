@@ -22,13 +22,22 @@ const convictionBg: Record<Conviction, string> = {
   LOW: 'bg-zinc-800 text-zinc-400 border border-zinc-700',
 };
 
+function daysSince(dateStr: string): number {
+  const then = new Date(dateStr).getTime();
+  const now = Date.now();
+  return Math.floor((now - then) / (1000 * 60 * 60 * 24));
+}
+
 export default function WatchList() {
   const [items, setItems] = useState<WatchItem[]>([]);
   const [liveData, setLiveData] = useState<Record<string, LiveData>>({});
   const [ticker, setTicker] = useState('');
   const [conviction, setConviction] = useState<Conviction>('MEDIUM');
   const [notes, setNotes] = useState('');
+  const [watchPrice, setWatchPrice] = useState('');
+  const [watchDate, setWatchDate] = useState(new Date().toISOString().split('T')[0]);
   const [adding, setAdding] = useState(false);
+  const [fetchingPrice, setFetchingPrice] = useState(false);
   const [sortConviction, setSortConviction] = useState(true);
 
   const load = useCallback(async () => {
@@ -38,6 +47,18 @@ export default function WatchList() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Auto-fetch current price when ticker is entered
+  async function handleTickerBlur() {
+    if (!ticker.trim() || watchPrice) return;
+    setFetchingPrice(true);
+    try {
+      const q = await finnhub.quote(ticker.trim());
+      if (q.c) setWatchPrice(q.c.toFixed(2));
+    } catch { /* ignore */ } finally {
+      setFetchingPrice(false);
+    }
+  }
+
   async function fetchLive(item: WatchItem) {
     setLiveData((prev) => ({ ...prev, [item.ticker]: { loading: true } }));
     try {
@@ -46,7 +67,7 @@ export default function WatchList() {
         finnhub.sentiment(item.ticker).catch(() => undefined),
       ]);
       setLiveData((prev) => ({ ...prev, [item.ticker]: { quote, sentiment, loading: false } }));
-    } catch (err) {
+    } catch {
       setLiveData((prev) => ({
         ...prev,
         [item.ticker]: { loading: false, error: 'Failed to fetch' },
@@ -65,16 +86,29 @@ export default function WatchList() {
     if (!ticker.trim()) return;
     setAdding(true);
     try {
+      // If no price entered, try to fetch it
+      let price: number | null = watchPrice ? parseFloat(watchPrice) : null;
+      if (!price) {
+        try {
+          const q = await finnhub.quote(ticker.trim());
+          price = q.c || null;
+        } catch { /* leave null */ }
+      }
+
       const item: WatchItem = {
         id: newId(),
         ticker: ticker.toUpperCase().trim(),
         conviction,
         notes,
+        watch_price: price,
+        watch_date: watchDate,
         added_at: nowIso(),
       };
       await storage.insert(TABLE, item);
       setTicker('');
       setNotes('');
+      setWatchPrice('');
+      setWatchDate(new Date().toISOString().split('T')[0]);
       setConviction('MEDIUM');
       await load();
     } finally {
@@ -100,14 +134,38 @@ export default function WatchList() {
       <div className="card">
         <h2 className="text-base font-semibold text-zinc-100 mb-4">Add to Watch List</h2>
         <form onSubmit={handleAdd} className="flex flex-wrap gap-3 items-end">
-          <div className="flex-1 min-w-32">
+          <div className="w-28">
             <label className="label">Ticker *</label>
             <input
               className="input-base uppercase"
               placeholder="NVDA"
               value={ticker}
-              onChange={(e) => setTicker(e.target.value)}
+              onChange={(e) => { setTicker(e.target.value); setWatchPrice(''); }}
+              onBlur={handleTickerBlur}
               required
+            />
+          </div>
+          <div className="w-28">
+            <label className="label">
+              Watch Price
+              {fetchingPrice && <span className="ml-1 text-zinc-600 text-xs">fetching…</span>}
+            </label>
+            <input
+              className="input-base"
+              type="number"
+              step="0.01"
+              placeholder="auto"
+              value={watchPrice}
+              onChange={(e) => setWatchPrice(e.target.value)}
+            />
+          </div>
+          <div className="w-36">
+            <label className="label">Watch Date</label>
+            <input
+              className="input-base"
+              type="date"
+              value={watchDate}
+              onChange={(e) => setWatchDate(e.target.value)}
             />
           </div>
           <div className="w-36">
@@ -122,7 +180,7 @@ export default function WatchList() {
               ))}
             </select>
           </div>
-          <div className="flex-1 min-w-48">
+          <div className="flex-1 min-w-40">
             <label className="label">Notes</label>
             <input
               className="input-base"
@@ -136,6 +194,9 @@ export default function WatchList() {
             {adding ? 'Adding...' : 'Add'}
           </button>
         </form>
+        <p className="text-xs text-zinc-600 mt-2">
+          Watch price auto-fills from Finnhub when you tab out of the ticker field. You can also enter it manually.
+        </p>
       </div>
 
       {/* Watch list */}
@@ -163,52 +224,120 @@ export default function WatchList() {
               const ld = liveData[item.ticker];
               const quote = ld?.quote;
               const sent = ld?.sentiment;
-              const pct = quote?.dp ?? null;
+              const currentPrice = quote?.c ?? null;
+              const dayPct = quote?.dp ?? null;
+
+              // Performance vs watch price
+              const watchPriceDiff =
+                currentPrice && item.watch_price
+                  ? currentPrice - item.watch_price
+                  : null;
+              const watchPricePct =
+                watchPriceDiff != null && item.watch_price
+                  ? (watchPriceDiff / item.watch_price) * 100
+                  : null;
+
+              const days = daysSince(item.watch_date);
+              const trending =
+                watchPricePct == null ? null : watchPricePct > 0.5 ? 'up' : watchPricePct < -0.5 ? 'down' : 'flat';
 
               return (
                 <div
                   key={item.id}
-                  className="flex items-center gap-4 p-4 bg-zinc-800/40 rounded-lg border border-zinc-800 hover:border-zinc-700 transition-colors"
+                  className="p-4 bg-zinc-800/40 rounded-lg border border-zinc-800 hover:border-zinc-700 transition-colors"
                 >
-                  {/* Ticker & conviction */}
-                  <div className="w-28 flex-shrink-0">
-                    <div className="font-mono font-bold text-blue-400 text-base">{item.ticker}</div>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${convictionBg[item.conviction]}`}>
-                      {item.conviction}
-                    </span>
-                  </div>
-
-                  {/* Price */}
-                  <div className="w-28 flex-shrink-0">
-                    {ld?.loading ? (
-                      <div className="text-zinc-600 text-xs animate-pulse">Loading...</div>
-                    ) : ld?.error ? (
-                      <div className="text-red-500 text-xs">{ld.error}</div>
-                    ) : quote ? (
-                      <>
-                        <div className="text-lg font-semibold tabular-nums">{fmtCurrency(quote.c)}</div>
-                        <div className={`text-xs font-medium flex items-center gap-1 ${changeColor(pct ?? 0)}`}>
-                          {(pct ?? 0) > 0 ? <TrendingUp size={10} /> : (pct ?? 0) < 0 ? <TrendingDown size={10} /> : <Minus size={10} />}
-                          {fmtPct(pct)}
-                        </div>
-                      </>
-                    ) : null}
-                  </div>
-
-                  {/* Day range */}
-                  {quote && (
-                    <div className="hidden sm:block w-36 flex-shrink-0 text-xs text-zinc-500">
-                      <div>H: {fmtCurrency(quote.h)}</div>
-                      <div>L: {fmtCurrency(quote.l)}</div>
+                  <div className="flex items-center gap-4 flex-wrap">
+                    {/* Ticker & conviction */}
+                    <div className="w-28 flex-shrink-0">
+                      <div className="font-mono font-bold text-blue-400 text-base">{item.ticker}</div>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${convictionBg[item.conviction]}`}>
+                        {item.conviction}
+                      </span>
                     </div>
-                  )}
 
-                  {/* Sentiment */}
-                  <div className="hidden md:block w-40 flex-shrink-0">
-                    {sent?.sentiment ? (
-                      <div className="space-y-0.5">
-                        <div className="text-xs text-zinc-500">News Sentiment</div>
-                        <div className="flex gap-2 text-xs">
+                    {/* Watch price → current price */}
+                    <div className="flex items-center gap-3 flex-shrink-0">
+                      {/* Watch entry */}
+                      <div className="text-center">
+                        <div className="text-xs text-zinc-600 mb-0.5">Added {item.watch_date}</div>
+                        <div className="text-sm text-zinc-400 tabular-nums font-medium">
+                          {item.watch_price ? fmtCurrency(item.watch_price) : '—'}
+                        </div>
+                      </div>
+
+                      {/* Arrow */}
+                      <div className="text-zinc-600">
+                        {trending === 'up' ? (
+                          <TrendingUp size={18} className="text-emerald-400" />
+                        ) : trending === 'down' ? (
+                          <TrendingDown size={18} className="text-red-400" />
+                        ) : (
+                          <Minus size={18} className="text-zinc-500" />
+                        )}
+                      </div>
+
+                      {/* Current price */}
+                      <div className="text-center">
+                        <div className="text-xs text-zinc-600 mb-0.5">Now</div>
+                        {ld?.loading ? (
+                          <div className="text-zinc-600 text-xs animate-pulse">Loading…</div>
+                        ) : ld?.error ? (
+                          <div className="text-red-500 text-xs">{ld.error}</div>
+                        ) : currentPrice ? (
+                          <div className="text-sm font-semibold tabular-nums">{fmtCurrency(currentPrice)}</div>
+                        ) : (
+                          <div className="text-zinc-600 text-xs">—</div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Since-watch performance */}
+                    {watchPricePct != null && (
+                      <div className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-center ${
+                        watchPricePct > 0
+                          ? 'bg-emerald-900/30 border border-emerald-800'
+                          : watchPricePct < 0
+                          ? 'bg-red-900/30 border border-red-800'
+                          : 'bg-zinc-800 border border-zinc-700'
+                      }`}>
+                        <div className="text-xs text-zinc-500 mb-0.5">Since watch ({days}d)</div>
+                        <div className={`text-base font-bold tabular-nums ${
+                          watchPricePct > 0 ? 'text-emerald-400' : watchPricePct < 0 ? 'text-red-400' : 'text-zinc-400'
+                        }`}>
+                          {watchPricePct > 0 ? '+' : ''}{watchPricePct.toFixed(2)}%
+                        </div>
+                        <div className={`text-xs tabular-nums ${
+                          watchPriceDiff! > 0 ? 'text-emerald-500' : watchPriceDiff! < 0 ? 'text-red-500' : 'text-zinc-500'
+                        }`}>
+                          {watchPriceDiff! > 0 ? '+' : ''}{fmtCurrency(watchPriceDiff!)}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Today's change */}
+                    {dayPct != null && (
+                      <div className="flex-shrink-0 text-center">
+                        <div className="text-xs text-zinc-600 mb-0.5">Today</div>
+                        <div className={`text-sm font-medium flex items-center gap-1 ${changeColor(dayPct)}`}>
+                          {dayPct > 0 ? <TrendingUp size={11} /> : dayPct < 0 ? <TrendingDown size={11} /> : <Minus size={11} />}
+                          {fmtPct(dayPct)}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Day range */}
+                    {quote && (
+                      <div className="hidden sm:block text-xs text-zinc-500">
+                        <div>H: {fmtCurrency(quote.h)}</div>
+                        <div>L: {fmtCurrency(quote.l)}</div>
+                      </div>
+                    )}
+
+                    {/* Sentiment */}
+                    {sent?.sentiment && (
+                      <div className="hidden md:block w-36">
+                        <div className="text-xs text-zinc-500 mb-1">Sentiment</div>
+                        <div className="flex gap-2 text-xs mb-1">
                           <span className="text-emerald-400">▲ {fmt(sent.sentiment.bullishPercent * 100, 0)}%</span>
                           <span className="text-red-400">▼ {fmt(sent.sentiment.bearishPercent * 100, 0)}%</span>
                         </div>
@@ -219,24 +348,26 @@ export default function WatchList() {
                           />
                         </div>
                       </div>
-                    ) : null}
-                  </div>
+                    )}
 
-                  {/* Notes */}
-                  <div className="flex-1 text-xs text-zinc-500 truncate hidden lg:block">{item.notes}</div>
+                    {/* Notes */}
+                    {item.notes && (
+                      <div className="flex-1 text-xs text-zinc-500 truncate hidden lg:block">{item.notes}</div>
+                    )}
 
-                  {/* Actions */}
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    <button
-                      onClick={() => fetchLive(item)}
-                      className="btn-ghost p-1.5"
-                      title="Refresh"
-                    >
-                      <RefreshCw size={13} className={ld?.loading ? 'animate-spin' : ''} />
-                    </button>
-                    <button onClick={() => handleDelete(item.id, item.ticker)} className="btn-danger">
-                      <Trash2 size={12} />
-                    </button>
+                    {/* Actions */}
+                    <div className="flex items-center gap-2 ml-auto flex-shrink-0">
+                      <button
+                        onClick={() => fetchLive(item)}
+                        className="btn-ghost p-1.5"
+                        title="Refresh"
+                      >
+                        <RefreshCw size={13} className={ld?.loading ? 'animate-spin' : ''} />
+                      </button>
+                      <button onClick={() => handleDelete(item.id, item.ticker)} className="btn-danger">
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
                   </div>
                 </div>
               );

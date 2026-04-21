@@ -23,6 +23,8 @@ export interface WatchItem {
   ticker: string;
   conviction: Conviction;
   notes: string;
+  watch_price: number | null;
+  watch_date: string;
   added_at: string;
 }
 
