@@ -1,0 +1,64 @@
+import { useState } from 'react';
+import { TrendingUp, Eye, BarChart2, PieChart, BookOpen } from 'lucide-react';
+import SwingScorecard from './components/tabs/SwingScorecard';
+import WatchList from './components/tabs/WatchList';
+import TechnicalSetup from './components/tabs/TechnicalSetup';
+import PortfolioRisk from './components/tabs/PortfolioRisk';
+import Fundamentals from './components/tabs/Fundamentals';
+
+const TABS = [
+  { id: 'scorecard', label: 'Swing Scorecard', icon: TrendingUp },
+  { id: 'watchlist', label: 'Watch List', icon: Eye },
+  { id: 'technical', label: 'Technical Setup', icon: BarChart2 },
+  { id: 'portfolio', label: 'Portfolio Risk', icon: PieChart },
+  { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
+] as const;
+
+type TabId = (typeof TABS)[number]['id'];
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<TabId>('scorecard');
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      {/* Header */}
+      <header className="border-b border-zinc-800 bg-zinc-900/50 backdrop-blur sticky top-0 z-10">
+        <div className="max-w-7xl mx-auto px-4">
+          <div className="flex items-center gap-3 py-3">
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-600">
+              <TrendingUp size={16} className="text-white" />
+            </div>
+            <h1 className="text-base font-semibold text-zinc-100">Swing Trading Dashboard</h1>
+            <span className="ml-auto text-xs text-zinc-600">Powered by Finnhub</span>
+          </div>
+          {/* Tab bar */}
+          <nav className="flex gap-1 -mb-px overflow-x-auto">
+            {TABS.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => setActiveTab(id)}
+                className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 whitespace-nowrap transition-colors ${
+                  activeTab === id
+                    ? 'border-blue-500 text-blue-400'
+                    : 'border-transparent text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                <Icon size={14} />
+                {label}
+              </button>
+            ))}
+          </nav>
+        </div>
+      </header>
+
+      {/* Content */}
+      <main className="max-w-7xl mx-auto px-4 py-6">
+        {activeTab === 'scorecard' && <SwingScorecard />}
+        {activeTab === 'watchlist' && <WatchList />}
+        {activeTab === 'technical' && <TechnicalSetup />}
+        {activeTab === 'portfolio' && <PortfolioRisk />}
+        {activeTab === 'fundamentals' && <Fundamentals />}
+      </main>
+    </div>
+  );
+}
