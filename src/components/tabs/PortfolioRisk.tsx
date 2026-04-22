@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
@@ -198,6 +198,13 @@ export default function PortfolioRisk() {
 
   async function handleDelete(id: string) {
     await storage.remove(TABLE, id);
+    await load();
+  }
+
+  async function handleClearAll() {
+    if (!window.confirm(`Delete all ${holdings.length} holdings? This cannot be undone.`)) return;
+    await Promise.all(holdings.map((h) => storage.remove(TABLE, h.id)));
+    setLivePrices({});
     await load();
   }
 
@@ -408,15 +415,25 @@ export default function PortfolioRisk() {
 
           {/* Holdings table */}
           <div className="card">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-base font-semibold text-zinc-100">Holdings by Account</h2>
-              <div className="flex gap-1 flex-wrap">
+            <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+              <h2 className="text-base font-semibold text-zinc-100">
+                Holdings by Account
+                <span className="text-zinc-600 text-sm font-normal ml-2">({holdings.length})</span>
+              </h2>
+              <div className="flex gap-1 flex-wrap items-center">
                 {['ALL', ...uniqueAccounts].map((a) => (
                   <button key={a} onClick={() => setFilterAccount(a)}
                     className={`text-xs px-2.5 py-1 rounded-full border transition ${filterAccount === a ? 'bg-blue-900/50 text-blue-300 border-blue-700' : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'}`}>
                     {a}
                   </button>
                 ))}
+                <button
+                  onClick={handleClearAll}
+                  className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border border-red-900 text-red-500 hover:bg-red-950/40 transition ml-2"
+                  title="Delete all holdings"
+                >
+                  <AlertTriangle size={10} /> Clear all
+                </button>
               </div>
             </div>
 
@@ -647,7 +664,11 @@ export default function PortfolioRisk() {
       )}
 
       {holdings.length === 0 && (
-        <div className="card text-center py-12 text-zinc-600 text-sm">Add holdings above or import your portfolio data from the header.</div>
+        <div className="card text-center py-12 space-y-3">
+          <p className="text-zinc-400 font-medium">No holdings yet</p>
+          <p className="text-zinc-600 text-sm">Use the <span className="text-zinc-300 font-medium">Add Holding</span> form above to add positions one at a time.</p>
+          <p className="text-zinc-700 text-xs">Or click <span className="text-zinc-500">Import Data</span> in the top header to load your full portfolio from the Excel file.</p>
+        </div>
       )}
     </div>
   );
