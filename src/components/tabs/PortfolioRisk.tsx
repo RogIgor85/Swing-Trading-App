@@ -3,6 +3,8 @@ import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle, Extern
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
+import { fetchYahoo } from '../../lib/yahoo';
+import { toYahooTicker } from '../FundamentalsDrawer';
 import { fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import FundamentalsDrawer from '../FundamentalsDrawer';
 import type { Holding, LiquidityRisk, Account, Currency } from '../../types';
@@ -116,14 +118,29 @@ export default function PortfolioRisk() {
     setEditingRate(false);
   }
 
-  // Fetch stock prices
+  // Fetch stock prices — Finnhub first, Yahoo Finance fallback for tickers Finnhub can't resolve
   useEffect(() => {
-    holdings.forEach((h) => {
-      if (!livePrices[h.ticker]) {
-        finnhub.quote(h.ticker)
-          .then((q) => setLivePrices((prev) => ({ ...prev, [h.ticker]: { price: q.c, changePct: q.dp } })))
-          .catch(() => {});
-      }
+    holdings.forEach(async (h) => {
+      if (livePrices[h.ticker]) return; // already have it
+      try {
+        const q = await finnhub.quote(h.ticker);
+        if (q.c && q.c > 0) {
+          setLivePrices((prev) => ({ ...prev, [h.ticker]: { price: q.c, changePct: q.dp } }));
+          return;
+        }
+      } catch { /* fall through to Yahoo */ }
+
+      // Finnhub returned 0 or failed — try Yahoo Finance (handles TSX .TO tickers)
+      try {
+        const yahooTicker = toYahooTicker(h.ticker, h.currency);
+        const y = await fetchYahoo(yahooTicker);
+        const price = y.price?.regularMarketPrice ?? null;
+        if (price && price > 0) {
+          const prev2 = y.price?.regularMarketPreviousClose ?? price;
+          const changePct = prev2 > 0 ? ((price - prev2) / prev2) * 100 : 0;
+          setLivePrices((prev) => ({ ...prev, [h.ticker]: { price, changePct } }));
+        }
+      } catch { /* give up */ }
     });
   }, [holdings]); // eslint-disable-line react-hooks/exhaustive-deps
 
