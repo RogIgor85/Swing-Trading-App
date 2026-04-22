@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { TrendingUp, Eye, BarChart2, PieChart, BookOpen, ClipboardList, Download } from 'lucide-react';
-import SwingScorecard from './components/tabs/SwingScorecard';
+import { TrendingUp, Eye, BarChart2, PieChart, BookOpen, ClipboardList, Download, Layers } from 'lucide-react';
+import TriFrameScorecard from './components/tabs/TriFrameScorecard';
 import WatchList from './components/tabs/WatchList';
 import TechnicalSetup from './components/tabs/TechnicalSetup';
 import PortfolioRisk from './components/tabs/PortfolioRisk';
@@ -9,7 +9,7 @@ import TradeJournal from './components/tabs/TradeJournal';
 import { importSeedData } from './data/seedData';
 
 const TABS = [
-  { id: 'scorecard', label: 'Swing Scorecard', icon: TrendingUp },
+  { id: 'scorecard', label: 'Scorecard', icon: Layers },
   { id: 'watchlist', label: 'Watch List', icon: Eye },
   { id: 'technical', label: 'Technical Setup', icon: BarChart2 },
   { id: 'portfolio', label: 'Portfolio Risk', icon: PieChart },
@@ -77,7 +77,7 @@ export default function App() {
 
       {/* Content */}
       <main className="max-w-7xl mx-auto px-4 py-6">
-        {activeTab === 'scorecard' && <SwingScorecard />}
+        {activeTab === 'scorecard' && <TriFrameScorecard />}
         {activeTab === 'watchlist' && <WatchList />}
         {activeTab === 'technical' && <TechnicalSetup />}
         {activeTab === 'portfolio' && <PortfolioRisk />}
