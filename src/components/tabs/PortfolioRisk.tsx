@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle } from 'lucide-react';
+import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle, ExternalLink, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
+import { fetchYahoo } from '../../lib/yahoo';
 import { fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import type { Holding, LiquidityRisk, Account, Currency } from '../../types';
+import type { YahooData } from '../../lib/yahoo';
 
 const MANUAL_PRICES_KEY = 'swing_manual_prices';
 const TABLE = 'portfolio_holdings';
@@ -64,6 +66,220 @@ function fmtCAD(n: number) {
   return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 2 }).format(n);
 }
 
+// ─── Fundamentals drawer ──────────────────────────────────────────────────────
+function fmtBig(n: number | null | undefined): string {
+  if (n == null) return '—';
+  if (n >= 1e12) return `$${(n / 1e12).toFixed(2)}T`;
+  if (n >= 1e9)  return `$${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6)  return `$${(n / 1e6).toFixed(1)}M`;
+  return `$${n.toFixed(0)}`;
+}
+function fmtPct2(n: number | null | undefined): string {
+  if (n == null) return '—';
+  return `${(n * 100).toFixed(1)}%`;
+}
+function fmtNum(n: number | null | undefined, decimals = 2): string {
+  if (n == null) return '—';
+  return n.toFixed(decimals);
+}
+
+function recLabel(key: string | null | undefined): { label: string; color: string } {
+  switch (key) {
+    case 'strongBuy':    return { label: 'Strong Buy',  color: 'text-emerald-400' };
+    case 'buy':          return { label: 'Buy',          color: 'text-emerald-300' };
+    case 'hold':         return { label: 'Hold',         color: 'text-amber-400'   };
+    case 'underperform': return { label: 'Underperform', color: 'text-red-400'     };
+    case 'sell':         return { label: 'Sell',         color: 'text-red-500'     };
+    default:             return { label: '—',            color: 'text-zinc-500'    };
+  }
+}
+
+function FundamentalsDrawer({ ticker, onClose }: { ticker: string; onClose: () => void }) {
+  const [data, setData] = useState<YahooData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    setData(null);
+    fetchYahoo(ticker).then((d) => { setData(d); setLoading(false); });
+  }, [ticker]);
+
+  const p  = data?.price;
+  const sd = data?.summaryDetail;
+  const fd = data?.financialData;
+  const ks = data?.defaultKeyStatistics;
+  const cal = data?.calendarEvents?.earnings;
+
+  const price    = p?.regularMarketPrice ?? null;
+  const prevClose = p?.regularMarketPreviousClose ?? sd?.regularMarketPreviousClose ?? null;
+  const dayChange = price != null && prevClose != null ? price - prevClose : null;
+  const dayChangePct = price != null && prevClose != null && prevClose !== 0 ? (dayChange! / prevClose) * 100 : null;
+  const dayHigh  = p?.regularMarketDayHigh ?? sd?.dayHigh ?? null;
+  const dayLow   = p?.regularMarketDayLow  ?? sd?.dayLow  ?? null;
+  const marketCap = p?.marketCap ?? sd?.marketCap ?? null;
+
+  const rec = recLabel(fd?.recommendationKey);
+  const earningsDate = cal?.earningsDate?.[0] ?? null;
+
+  const w52High = sd?.fiftyTwoWeekHigh ?? null;
+  const w52Low  = sd?.fiftyTwoWeekLow  ?? null;
+  const ma50    = sd?.fiftyDayAverage  ?? null;
+  const ma200   = sd?.twoHundredDayAverage ?? null;
+  const w52Pct  = price != null && w52Low != null && w52High != null && w52High !== w52Low
+    ? ((price - w52Low) / (w52High - w52Low)) * 100
+    : null;
+
+  function Row({ label, value, colored }: { label: string; value: string; colored?: string }) {
+    return (
+      <div className="flex justify-between items-center py-1.5 border-b border-zinc-800/60 last:border-0">
+        <span className="text-xs text-zinc-500">{label}</span>
+        <span className={`text-xs font-medium tabular-nums ${colored ?? 'text-zinc-200'}`}>{value}</span>
+      </div>
+    );
+  }
+
+  function Section({ title, children }: { title: string; children: React.ReactNode }) {
+    return (
+      <div className="mb-4">
+        <div className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1 pb-1 border-b border-zinc-800">{title}</div>
+        {children}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
+
+      {/* Drawer panel */}
+      <div className="fixed right-0 top-0 h-full w-80 bg-zinc-950 border-l border-zinc-800 z-50 flex flex-col shadow-2xl">
+        {/* Header */}
+        <div className="flex items-center justify-between p-4 border-b border-zinc-800">
+          <div>
+            <div className="font-mono font-bold text-blue-400 text-lg">{ticker}</div>
+            {p?.longName && <div className="text-xs text-zinc-400 truncate mt-0.5 max-w-56">{p.longName}</div>}
+            {p?.exchangeName && <div className="text-xs text-zinc-600">{p.exchangeName} · {p.currency}</div>}
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 p-1 transition-colors">
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-4">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center h-40 gap-3">
+              <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              <span className="text-xs text-zinc-500">Loading {ticker}…</span>
+            </div>
+          ) : data?._error ? (
+            <div className="flex flex-col items-center justify-center h-40 gap-2 text-center">
+              <AlertTriangle size={20} className="text-amber-500" />
+              <p className="text-xs text-zinc-500">No data available for {ticker}</p>
+              <p className="text-xs text-zinc-700">May be a mutual fund or unlisted ticker</p>
+            </div>
+          ) : (
+            <>
+              {/* Price hero */}
+              <div className="mb-5 bg-zinc-900 rounded-xl p-4">
+                <div className="text-3xl font-bold tabular-nums">
+                  {price != null ? fmtCurrency(price) : '—'}
+                </div>
+                {dayChange != null && (
+                  <div className={`flex items-center gap-1.5 mt-1 text-sm font-medium ${dayChange >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {dayChange >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+                    {dayChange >= 0 ? '+' : ''}{fmtCurrency(dayChange)} ({dayChangePct?.toFixed(2)}%)
+                  </div>
+                )}
+                {(dayHigh != null || dayLow != null) && (
+                  <div className="text-xs text-zinc-600 mt-1.5">
+                    Day: {dayLow != null ? fmtCurrency(dayLow) : '—'} – {dayHigh != null ? fmtCurrency(dayHigh) : '—'}
+                  </div>
+                )}
+              </div>
+
+              {/* 52-week range bar */}
+              {w52Pct != null && (
+                <div className="mb-5 bg-zinc-900 rounded-xl p-3">
+                  <div className="flex justify-between text-xs text-zinc-600 mb-1">
+                    <span>52W Low: {fmtCurrency(w52Low!)}</span>
+                    <span>52W High: {fmtCurrency(w52High!)}</span>
+                  </div>
+                  <div className="relative bg-zinc-700 rounded-full h-2">
+                    <div className="absolute bg-gradient-to-r from-red-500 to-emerald-500 h-2 rounded-full w-full opacity-30" />
+                    <div
+                      className="absolute w-3 h-3 bg-white rounded-full border-2 border-zinc-900 shadow-md"
+                      style={{ left: `calc(${w52Pct.toFixed(1)}% - 6px)`, top: '-2px' }}
+                    />
+                  </div>
+                  <div className="text-center text-xs text-zinc-500 mt-1">{w52Pct.toFixed(0)}% of 52W range</div>
+                </div>
+              )}
+
+              <Section title="Moving Averages">
+                <Row label="50-Day MA"    value={ma50  != null ? fmtCurrency(ma50)  : '—'} colored={price != null && ma50  != null ? (price > ma50  ? 'text-emerald-400' : 'text-red-400') : undefined} />
+                <Row label="200-Day MA"   value={ma200 != null ? fmtCurrency(ma200) : '—'} colored={price != null && ma200 != null ? (price > ma200 ? 'text-emerald-400' : 'text-red-400') : undefined} />
+              </Section>
+
+              <Section title="Valuation">
+                <Row label="Market Cap"   value={fmtBig(marketCap)} />
+                <Row label="Trailing P/E" value={fmtNum(sd?.trailingPE, 1)} />
+                <Row label="Forward P/E"  value={fmtNum(sd?.forwardPE ?? ks?.forwardPE, 1)} />
+                <Row label="Price/Book"   value={fmtNum(ks?.priceToBook, 1)} />
+                <Row label="PEG Ratio"    value={fmtNum(ks?.pegRatio, 2)} />
+                <Row label="Beta"         value={fmtNum(sd?.beta ?? ks?.beta, 2)} />
+              </Section>
+
+              <Section title="Fundamentals">
+                <Row label="Revenue Growth"  value={fmtPct2(fd?.revenueGrowth)}  colored={fd?.revenueGrowth != null ? (fd.revenueGrowth >= 0 ? 'text-emerald-400' : 'text-red-400') : undefined} />
+                <Row label="Earnings Growth" value={fmtPct2(fd?.earningsGrowth)} colored={fd?.earningsGrowth != null ? (fd.earningsGrowth >= 0 ? 'text-emerald-400' : 'text-red-400') : undefined} />
+                <Row label="Profit Margin"   value={fmtPct2(fd?.profitMargins ?? ks?.profitMargins)} />
+                <Row label="ROE"             value={fmtPct2(fd?.returnOnEquity)} />
+                <Row label="Free Cash Flow"  value={fmtBig(fd?.freeCashflow)} />
+                <Row label="Current Ratio"   value={fmtNum(fd?.currentRatio, 2)} />
+                <Row label="Debt / Equity"   value={fd?.debtToEquity != null ? `${fmtNum(fd.debtToEquity / 100, 2)}x` : '—'} colored={fd?.debtToEquity != null ? (fd.debtToEquity < 100 ? 'text-emerald-400' : fd.debtToEquity < 200 ? 'text-amber-400' : 'text-red-400') : undefined} />
+              </Section>
+
+              <Section title="Analyst Coverage">
+                <Row label="Recommendation" value={rec.label} colored={rec.color} />
+                <Row label="Analysts"        value={fd?.numberOfAnalystOpinions != null ? `${fd.numberOfAnalystOpinions}` : '—'} />
+                <Row label="Target (mean)"   value={fd?.targetMeanPrice != null ? fmtCurrency(fd.targetMeanPrice) : '—'} />
+                <Row label="Target (high)"   value={fd?.targetHighPrice != null ? fmtCurrency(fd.targetHighPrice) : '—'} />
+                <Row label="Target (low)"    value={fd?.targetLowPrice  != null ? fmtCurrency(fd.targetLowPrice)  : '—'} />
+                {price != null && fd?.targetMeanPrice != null && (
+                  <Row
+                    label="Upside to target"
+                    value={`${((fd.targetMeanPrice - price) / price * 100).toFixed(1)}%`}
+                    colored={(fd.targetMeanPrice >= price) ? 'text-emerald-400' : 'text-red-400'}
+                  />
+                )}
+              </Section>
+
+              <Section title="Risk & Flow">
+                <Row label="Short % of Float" value={ks?.shortPercentOfFloat != null ? fmtPct2(ks.shortPercentOfFloat) : '—'} colored={ks?.shortPercentOfFloat != null ? (ks.shortPercentOfFloat > 0.1 ? 'text-red-400' : 'text-zinc-200') : undefined} />
+                <Row label="Short Ratio"      value={fmtNum(ks?.shortRatio, 1)} />
+                <Row label="Avg Volume"       value={sd?.averageVolume != null ? `${(sd.averageVolume / 1e6).toFixed(1)}M` : '—'} />
+              </Section>
+
+              {earningsDate && (
+                <Section title="Events">
+                  <Row label="Next Earnings" value={new Date(earningsDate).toLocaleDateString('en-CA')} colored="text-blue-300" />
+                </Section>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Footer hint */}
+        <div className="p-3 border-t border-zinc-800 text-xs text-zinc-700 text-center">
+          Data via Yahoo Finance · {data?._partial ? 'partial data' : 'full fundamentals'}
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function PortfolioRisk() {
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [livePrices, setLivePrices] = useState<Record<string, LivePrice>>({});
@@ -71,6 +287,7 @@ export default function PortfolioRisk() {
   const [editingPrice, setEditingPrice] = useState<string | null>(null);
   const [priceInput, setPriceInput] = useState('');
   const priceInputRef = useRef<HTMLInputElement>(null);
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
 
   // USD/CAD exchange rate
   const [usdCadRate, setUsdCadRate] = useState<number>(DEFAULT_RATE);
@@ -466,7 +683,16 @@ export default function PortfolioRisk() {
                 <tbody className="divide-y divide-zinc-800">
                   {filtered.map((h) => (
                     <tr key={h.id} className="tr-hover">
-                      <td className="td font-mono font-bold text-blue-400">{h.ticker}</td>
+                      <td className="td">
+                        <button
+                          onClick={() => setSelectedTicker(h.ticker)}
+                          className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 transition-colors flex items-center gap-1 group"
+                          title={`View fundamentals for ${h.ticker}`}
+                        >
+                          {h.ticker}
+                          <ExternalLink size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
+                        </button>
+                      </td>
                       <td className="td"><span className={`text-xs font-semibold ${accountColors[h.account]}`}>{h.account}</span></td>
                       <td className="td text-xs text-zinc-500">{h.currency}</td>
                       <td className="td tabular-nums text-xs">{fmt(h.shares, 3)}</td>
@@ -631,25 +857,57 @@ export default function PortfolioRisk() {
           {/* Correlation heatmap */}
           {tickers.length > 1 && tickers.length <= 20 && (
             <div className="card">
-              <h2 className="text-base font-semibold text-zinc-100 mb-1">Correlation Heatmap</h2>
-              <p className="text-xs text-zinc-600 mb-4">Sector-based approximation. Red = high correlation = concentrated risk.</p>
+              <div className="flex items-start justify-between mb-1 flex-wrap gap-2">
+                <div>
+                  <h2 className="text-base font-semibold text-zinc-100">Correlation Heatmap</h2>
+                  <p className="text-xs text-zinc-600 mt-0.5">
+                    Sector-based estimate — not real price correlation.
+                    Higher values = stocks likely move together = less diversification benefit.
+                  </p>
+                </div>
+                {/* Legend */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {[
+                    { bg: 'bg-red-700',      label: '0.9–1.0', tip: 'Same stock or near-identical sector' },
+                    { bg: 'bg-red-600/60',   label: '0.7–0.9', tip: 'Same sector' },
+                    { bg: 'bg-amber-600/60', label: '0.5–0.7', tip: 'Related sectors (e.g. Tech + Comm)' },
+                    { bg: 'bg-zinc-600',     label: '0.3–0.5', tip: 'Moderate' },
+                    { bg: 'bg-zinc-700/50',  label: '0.0–0.3', tip: 'Low / unrelated sectors' },
+                  ].map(({ bg, label, tip }) => (
+                    <div key={label} className="flex items-center gap-1" title={tip}>
+                      <div className={`w-4 h-4 rounded ${bg}`} />
+                      <span className="text-xs text-zinc-500">{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="mt-3 p-3 bg-zinc-900/50 rounded-lg border border-zinc-800 text-xs text-zinc-500 mb-4 space-y-1">
+                <div><span className="text-zinc-300 font-medium">How to read it:</span> Each cell shows how closely two stocks are expected to move together (0 = no relationship, 1 = move in lockstep).</div>
+                <div>Two Technology stocks get <span className="text-red-400 font-mono">0.75</span> — they tend to fall together in sell-offs. A Technology + Energy pair gets <span className="text-zinc-300 font-mono">0.20</span> — much better diversification.</div>
+                <div className="text-zinc-600">⚠ This uses sector rules, not actual 1-year price history. Use as a rough guide only.</div>
+              </div>
               <div className="overflow-x-auto">
                 <table className="text-xs">
                   <thead>
                     <tr>
                       <th className="w-16" />
-                      {tickers.map((t) => <th key={t} className="text-center font-mono text-zinc-400 pb-2 px-0.5 min-w-10">{t.slice(0, 4)}</th>)}
+                      {tickers.map((t) => <th key={t} className="text-center font-mono text-zinc-400 pb-2 px-0.5 min-w-10">{t.slice(0, 5)}</th>)}
                     </tr>
                   </thead>
                   <tbody>
                     {tickers.map((rowT) => (
                       <tr key={rowT}>
-                        <td className="font-mono text-zinc-400 pr-2 py-0.5 text-xs">{rowT.slice(0, 6)}</td>
+                        <td className="font-mono text-zinc-400 pr-2 py-0.5 text-xs">{rowT.slice(0, 7)}</td>
                         {tickers.map((colT) => {
                           const v = sectorCorr(rowT, colT);
                           return (
                             <td key={colT} className="p-0.5">
-                              <div className={`w-8 h-8 rounded flex items-center justify-center font-semibold text-white/80 text-xs ${corrColor(v)}`}>{fmt(v, 1)}</div>
+                              <div
+                                className={`w-9 h-9 rounded flex items-center justify-center font-semibold text-white/80 text-xs ${corrColor(v)}`}
+                                title={`${rowT} ↔ ${colT}: ${v.toFixed(2)}`}
+                              >
+                                {fmt(v, 2)}
+                              </div>
                             </td>
                           );
                         })}
@@ -669,6 +927,11 @@ export default function PortfolioRisk() {
           <p className="text-zinc-600 text-sm">Use the <span className="text-zinc-300 font-medium">Add Holding</span> form above to add positions one at a time.</p>
           <p className="text-zinc-700 text-xs">Or click <span className="text-zinc-500">Import Data</span> in the top header to load your full portfolio from the Excel file.</p>
         </div>
+      )}
+
+      {/* Fundamentals drawer */}
+      {selectedTicker && (
+        <FundamentalsDrawer ticker={selectedTicker} onClose={() => setSelectedTicker(null)} />
       )}
     </div>
   );

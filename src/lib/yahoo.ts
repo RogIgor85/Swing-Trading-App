@@ -78,6 +78,7 @@ export interface YahooData {
   calendarEvents?: { earnings?: YahooCalendar };
   price?: YahooPrice;
   _error?: string;
+  _partial?: boolean;
 }
 
 export async function fetchYahoo(ticker: string): Promise<YahooData> {
