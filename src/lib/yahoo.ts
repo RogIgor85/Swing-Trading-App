@@ -44,10 +44,31 @@ export interface YahooSummaryDetail {
   forwardPE?: number | null;
   beta?: number | null;
   volume?: number | null;
+  previousClose?: number | null;
+  open?: number | null;
+  dayLow?: number | null;
+  dayHigh?: number | null;
+  regularMarketPreviousClose?: number | null;
+  regularMarketOpen?: number | null;
+}
+
+export interface YahooPrice {
+  regularMarketPrice?: number | null;
+  regularMarketOpen?: number | null;
+  regularMarketDayHigh?: number | null;
+  regularMarketDayLow?: number | null;
+  regularMarketPreviousClose?: number | null;
+  regularMarketVolume?: number | null;
+  longName?: string | null;
+  shortName?: string | null;
+  exchangeName?: string | null;
+  fullExchangeName?: string | null;
+  currency?: string | null;
+  marketCap?: number | null;
 }
 
 export interface YahooCalendar {
-  earningsDate?: string[] | null;  // ISO date strings
+  earningsDate?: string[] | null;
 }
 
 export interface YahooData {
@@ -55,7 +76,8 @@ export interface YahooData {
   defaultKeyStatistics?: YahooKeyStats;
   summaryDetail?: YahooSummaryDetail;
   calendarEvents?: { earnings?: YahooCalendar };
-  _error?: string;   // set when Yahoo Finance call failed
+  price?: YahooPrice;
+  _error?: string;
 }
 
 export async function fetchYahoo(ticker: string): Promise<YahooData> {

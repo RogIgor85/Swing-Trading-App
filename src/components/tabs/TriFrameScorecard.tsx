@@ -274,22 +274,71 @@ export default function TriFrameScorecard() {
     setResult(null);
 
     try {
+      // TSX and other exchange suffixes — strip for Finnhub, keep for Yahoo Finance
+      const SUFFIXES = ['.TO', '.V', '.TSX', '.CN', '.NEO', '.VN'];
+      const suffix = SUFFIXES.find(s => t.endsWith(s)) ?? null;
+      const finnhubTicker = suffix ? t.slice(0, t.length - suffix.length) : t;
+      const yahooTicker   = t;
+
       const [quoteRes, profileRes, metricsRes, sentimentRes, yahooRes] = await Promise.allSettled([
-        finnhub.quote(t),
-        finnhub.profile(t),
-        finnhub.metrics(t),
-        finnhub.sentiment(t),
-        fetchYahoo(t),
+        finnhub.quote(finnhubTicker),
+        finnhub.profile(finnhubTicker),
+        finnhub.metrics(finnhubTicker),
+        finnhub.sentiment(finnhubTicker),
+        fetchYahoo(yahooTicker),
       ]);
 
-      const quote   = quoteRes.status   === 'fulfilled' ? quoteRes.value   : null;
-      const profile = profileRes.status === 'fulfilled' ? profileRes.value : null;
-      const metrics = metricsRes.status === 'fulfilled' ? metricsRes.value : null;
-      const sentiment = sentimentRes.status === 'fulfilled' ? sentimentRes.value : null;
-      const yahoo   = yahooRes.status   === 'fulfilled' ? yahooRes.value   : {};
+      const finnhubQuote   = quoteRes.status   === 'fulfilled' ? quoteRes.value   : null;
+      const finnhubProfile = profileRes.status === 'fulfilled' ? profileRes.value : null;
+      const metrics        = metricsRes.status === 'fulfilled' ? metricsRes.value : null;
+      const sentiment      = sentimentRes.status === 'fulfilled' ? sentimentRes.value : null;
+      const yahoo          = yahooRes.status    === 'fulfilled' ? yahooRes.value   : {};
 
-      if (!quote || !quote.c || !profile || !profile.name) {
-        setError(`Could not find data for "${t}". Check the ticker and try again.`);
+      // For exchange-suffix tickers (e.g. .TO) Finnhub may return the wrong company
+      // (T → AT&T instead of Telus). Detect by checking if the exchange is non-Canadian.
+      const fExchange = finnhubProfile?.exchange?.toLowerCase() ?? '';
+      const isCanadian = fExchange.includes('tsx') || fExchange.includes('toronto') ||
+                         fExchange.includes('canada') || fExchange.includes('cnq');
+      const finnhubWrongStock = suffix && finnhubProfile && !isCanadian;
+
+      // Build authoritative quote — prefer Yahoo Finance price for exchange-suffix tickers
+      const yp = yahoo.price;
+      const yfPrice = yp?.regularMarketPrice ?? null;
+      const sd = yahoo.summaryDetail;
+
+      let quote = finnhubQuote;
+      if (suffix && yfPrice) {
+        // Synthesise a quote object from Yahoo Finance data
+        quote = {
+          c:  yfPrice,
+          d:  0,
+          dp: 0,
+          h:  yp?.regularMarketDayHigh ?? sd?.dayHigh ?? yfPrice,
+          l:  yp?.regularMarketDayLow  ?? sd?.dayLow  ?? yfPrice,
+          o:  yp?.regularMarketOpen    ?? sd?.open     ?? yfPrice,
+          pc: yp?.regularMarketPreviousClose ?? sd?.previousClose ?? yfPrice,
+        };
+      }
+
+      // Build authoritative profile — use Yahoo Finance when Finnhub is wrong/missing
+      let profile = finnhubWrongStock ? null : finnhubProfile;
+      if (!profile) {
+        if (yp?.longName ?? yp?.shortName) {
+          profile = {
+            name:                   yp?.longName ?? yp?.shortName ?? t,
+            ticker:                 t,
+            exchange:               yp?.fullExchangeName ?? yp?.exchangeName ?? (suffix ? 'TSX' : ''),
+            finnhubIndustry:        '',
+            marketCapitalization:   (yp?.marketCap ?? sd?.marketCap ?? 0) / 1e6,
+            shareOutstanding:       0,
+            logo:                   '',
+            weburl:                 '',
+          };
+        }
+      }
+
+      if (!quote?.c || !profile?.name) {
+        setError(`Could not find data for "${t}". Check the ticker symbol and try again.`);
         return;
       }
 
