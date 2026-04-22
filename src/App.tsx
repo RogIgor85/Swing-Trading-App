@@ -1,14 +1,11 @@
 import { useState } from 'react';
-import { TrendingUp, Eye, BarChart2, PieChart, BookOpen, ClipboardList, Download, Layers, Lock, Unlock } from 'lucide-react';
+import { TrendingUp, Eye, BarChart2, PieChart, BookOpen, ClipboardList, Layers } from 'lucide-react';
 import TriFrameScorecard from './components/tabs/TriFrameScorecard';
 import WatchList from './components/tabs/WatchList';
 import TechnicalSetup from './components/tabs/TechnicalSetup';
 import PortfolioRisk from './components/tabs/PortfolioRisk';
 import Fundamentals from './components/tabs/Fundamentals';
 import TradeJournal from './components/tabs/TradeJournal';
-import { importSeedData } from './data/seedData';
-
-const LOCK_KEY = 'swing_locked';
 
 const TABS = [
   { id: 'scorecard', label: 'Scorecard', icon: Layers },
@@ -23,25 +20,6 @@ type TabId = (typeof TABS)[number]['id'];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('scorecard');
-  const [importing, setImporting] = useState(false);
-  // Default locked=true so Import Data is hidden for anyone who hasn't explicitly unlocked
-  const [locked, setLocked] = useState<boolean>(() => localStorage.getItem(LOCK_KEY) !== 'false');
-
-  async function handleImport() {
-    setImporting(true);
-    try {
-      await importSeedData();
-      alert('Portfolio data imported! Refresh the tab to see it.');
-    } finally {
-      setImporting(false);
-    }
-  }
-
-  function toggleLock() {
-    const next = !locked;
-    setLocked(next);
-    localStorage.setItem(LOCK_KEY, String(next));
-  }
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -54,30 +32,7 @@ export default function App() {
             </div>
             <h1 className="text-base font-semibold text-zinc-100">Swing Trading Dashboard</h1>
 
-            <div className="ml-auto flex items-center gap-3">
-              {!locked && (
-                <button
-                  onClick={handleImport}
-                  disabled={importing}
-                  className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
-                  title="Import portfolio seed data from Excel"
-                >
-                  <Download size={12} />
-                  {importing ? 'Importing…' : 'Import Data'}
-                </button>
-              )}
-              <button
-                onClick={toggleLock}
-                className={`flex items-center gap-1.5 text-xs transition-colors ${locked ? 'text-amber-500 hover:text-amber-300' : 'text-zinc-600 hover:text-zinc-400'}`}
-                title={locked ? 'Locked — click to unlock admin controls' : 'Click to lock (hides Import Data for sharing)'}
-              >
-                {locked ? <Lock size={12} /> : <Unlock size={12} />}
-                {locked ? 'Locked' : 'Lock'}
-              </button>
-            </div>
-
-            <span className="text-xs text-zinc-700 mx-1">|</span>
-            <span className="text-xs text-zinc-600">Powered by Finnhub</span>
+            <span className="ml-auto text-xs text-zinc-600">Powered by Finnhub</span>
           </div>
           {/* Tab bar */}
           <nav className="flex gap-1 -mb-px overflow-x-auto">
