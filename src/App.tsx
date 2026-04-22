@@ -24,7 +24,8 @@ type TabId = (typeof TABS)[number]['id'];
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('scorecard');
   const [importing, setImporting] = useState(false);
-  const [locked, setLocked] = useState<boolean>(() => localStorage.getItem(LOCK_KEY) === 'true');
+  // Default locked=true so Import Data is hidden for anyone who hasn't explicitly unlocked
+  const [locked, setLocked] = useState<boolean>(() => localStorage.getItem(LOCK_KEY) !== 'false');
 
   async function handleImport() {
     setImporting(true);
