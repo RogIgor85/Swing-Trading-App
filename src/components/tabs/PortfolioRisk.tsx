@@ -94,15 +94,27 @@ function recLabel(key: string | null | undefined): { label: string; color: strin
   }
 }
 
-function FundamentalsDrawer({ ticker, onClose }: { ticker: string; onClose: () => void }) {
+const TSX_SUFFIXES = ['.TO', '.V', '.TSX', '.CN', '.NEO', '.VN'];
+
+function toYahooTicker(ticker: string, currency: string): string {
+  // If already has an exchange suffix, use as-is
+  if (TSX_SUFFIXES.some((s) => ticker.toUpperCase().endsWith(s))) return ticker;
+  // CAD holdings without a suffix → assume TSX, append .TO
+  if (currency === 'CAD') return `${ticker}.TO`;
+  return ticker;
+}
+
+function FundamentalsDrawer({ ticker, currency, onClose }: { ticker: string; currency: string; onClose: () => void }) {
   const [data, setData] = useState<YahooData | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const yahooTicker = toYahooTicker(ticker, currency);
 
   useEffect(() => {
     setLoading(true);
     setData(null);
-    fetchYahoo(ticker).then((d) => { setData(d); setLoading(false); });
-  }, [ticker]);
+    fetchYahoo(yahooTicker).then((d) => { setData(d); setLoading(false); });
+  }, [yahooTicker]);
 
   const p  = data?.price;
   const sd = data?.summaryDetail;
@@ -157,7 +169,12 @@ function FundamentalsDrawer({ ticker, onClose }: { ticker: string; onClose: () =
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-zinc-800">
           <div>
-            <div className="font-mono font-bold text-blue-400 text-lg">{ticker}</div>
+            <div className="flex items-baseline gap-2">
+              <div className="font-mono font-bold text-blue-400 text-lg">{ticker}</div>
+              {yahooTicker !== ticker && (
+                <span className="text-xs text-zinc-600 font-mono">{yahooTicker}</span>
+              )}
+            </div>
             {p?.longName && <div className="text-xs text-zinc-400 truncate mt-0.5 max-w-56">{p.longName}</div>}
             {p?.exchangeName && <div className="text-xs text-zinc-600">{p.exchangeName} · {p.currency}</div>}
           </div>
@@ -287,7 +304,7 @@ export default function PortfolioRisk() {
   const [editingPrice, setEditingPrice] = useState<string | null>(null);
   const [priceInput, setPriceInput] = useState('');
   const priceInputRef = useRef<HTMLInputElement>(null);
-  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [selectedTicker, setSelectedTicker] = useState<{ ticker: string; currency: string } | null>(null);
 
   // USD/CAD exchange rate
   const [usdCadRate, setUsdCadRate] = useState<number>(DEFAULT_RATE);
@@ -685,7 +702,7 @@ export default function PortfolioRisk() {
                     <tr key={h.id} className="tr-hover">
                       <td className="td">
                         <button
-                          onClick={() => setSelectedTicker(h.ticker)}
+                          onClick={() => setSelectedTicker({ ticker: h.ticker, currency: h.currency })}
                           className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 transition-colors flex items-center gap-1 group"
                           title={`View fundamentals for ${h.ticker}`}
                         >
@@ -792,7 +809,12 @@ export default function PortfolioRisk() {
                   <Pie data={pieData} cx="50%" cy="50%" outerRadius={100} dataKey="value" label={({ value }) => `${value.toFixed(1)}%`} labelLine={false}>
                     {pieData.map((_, i) => <Cell key={i} fill={SECTOR_COLORS[i % SECTOR_COLORS.length]} />)}
                   </Pie>
-                  <Tooltip formatter={(v: number) => [`${v.toFixed(1)}%`, 'Allocation']} contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8 }} labelStyle={{ color: '#a1a1aa' }} />
+                  <Tooltip
+                    formatter={(v: number) => [`${v.toFixed(1)}%`, 'Allocation']}
+                    contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8 }}
+                    labelStyle={{ color: '#ffffff', fontWeight: 600 }}
+                    itemStyle={{ color: '#ffffff' }}
+                  />
                   <Legend formatter={(value) => <span className="text-xs text-zinc-400">{value}</span>} />
                 </PieChart>
               </ResponsiveContainer>
@@ -931,7 +953,7 @@ export default function PortfolioRisk() {
 
       {/* Fundamentals drawer */}
       {selectedTicker && (
-        <FundamentalsDrawer ticker={selectedTicker} onClose={() => setSelectedTicker(null)} />
+        <FundamentalsDrawer ticker={selectedTicker.ticker} currency={selectedTicker.currency} onClose={() => setSelectedTicker(null)} />
       )}
     </div>
   );
