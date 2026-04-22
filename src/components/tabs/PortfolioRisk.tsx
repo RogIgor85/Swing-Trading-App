@@ -442,7 +442,7 @@ export default function PortfolioRisk() {
 
             <p className="text-xs text-zinc-600 mb-3">
               Click any price in the <span className="text-zinc-400">Current</span> column to enter it manually.
-              <span className="text-amber-500 font-semibold ml-2">M</span> = manual override.
+              <span className="text-amber-500 font-semibold ml-2">M ×</span> = manual override — click it to restore auto pricing.
               Market Value and P&L shown in native currency; totals converted to CAD above.
             </p>
 
@@ -504,16 +504,26 @@ export default function PortfolioRisk() {
                             <button onClick={() => setEditingPrice(null)} className="text-zinc-500 hover:text-zinc-300 p-0.5"><X size={12} /></button>
                           </div>
                         ) : (
-                          <button
-                            onClick={() => startEditPrice(h.ticker, h.currentPrice)}
-                            className="group flex items-center gap-1.5 hover:text-blue-300 transition-colors"
-                            title={h.priceSource === 'manual' ? 'Manual price — click to edit' : h.priceSource === 'cost' ? 'No live price — click to enter manually' : 'Live price — click to override'}
-                          >
-                            <span className={h.priceSource === 'cost' ? 'text-zinc-600' : ''}>{fmtCurrency(h.currentPrice)}</span>
-                            {h.priceSource === 'manual' && <span className="text-xs text-amber-500 font-semibold">M</span>}
-                            {h.priceSource === 'cost' && <span className="text-xs text-zinc-600">—</span>}
-                            <Pencil size={10} className="opacity-0 group-hover:opacity-60 text-zinc-400 transition-opacity" />
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => startEditPrice(h.ticker, h.currentPrice)}
+                              className="group flex items-center gap-1 hover:text-blue-300 transition-colors"
+                              title={h.priceSource === 'cost' ? 'No live price — click to enter manually' : 'Click to override price'}
+                            >
+                              <span className={h.priceSource === 'cost' ? 'text-zinc-600' : ''}>{fmtCurrency(h.currentPrice)}</span>
+                              {h.priceSource === 'cost' && <span className="text-xs text-zinc-600">—</span>}
+                              <Pencil size={10} className="opacity-0 group-hover:opacity-60 text-zinc-400 transition-opacity" />
+                            </button>
+                            {h.priceSource === 'manual' && (
+                              <button
+                                onClick={() => clearManualPrice(h.ticker)}
+                                className="text-xs font-bold text-amber-500 hover:text-white hover:bg-amber-600 px-1 rounded transition-colors leading-none py-0.5"
+                                title="Manual override — click to restore auto price"
+                              >
+                                M ×
+                              </button>
+                            )}
+                          </div>
                         )}
                       </td>
 
@@ -553,11 +563,6 @@ export default function PortfolioRisk() {
                       <td className="td">
                         <div className="flex gap-1">
                           <button onClick={() => startEdit(h)} className="btn-ghost p-1" title="Edit holding"><Edit2 size={12} /></button>
-                          {h.priceSource === 'manual' && (
-                            <button onClick={() => clearManualPrice(h.ticker)} className="btn-ghost p-1 text-amber-500 hover:text-amber-300" title="Clear manual price">
-                              <X size={12} />
-                            </button>
-                          )}
                           <button onClick={() => handleDelete(h.id)} className="btn-danger" title="Delete"><Trash2 size={12} /></button>
                         </div>
                       </td>
