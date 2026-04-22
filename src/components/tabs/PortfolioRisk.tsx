@@ -1,10 +1,12 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Plus, Trash2, Edit2, X, Check } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Plus, Trash2, Edit2, X, Check, Pencil } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
 import { fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import type { Holding, LiquidityRisk, Account, Currency } from '../../types';
+
+const MANUAL_PRICES_KEY = 'swing_manual_prices';
 
 const TABLE = 'portfolio_holdings';
 
@@ -51,9 +53,20 @@ const defaultForm = {
 
 interface LivePrice { price: number; changePct: number }
 
+function loadManualPrices(): Record<string, number> {
+  try { return JSON.parse(localStorage.getItem(MANUAL_PRICES_KEY) ?? '{}'); } catch { return {}; }
+}
+function saveManualPrices(prices: Record<string, number>) {
+  localStorage.setItem(MANUAL_PRICES_KEY, JSON.stringify(prices));
+}
+
 export default function PortfolioRisk() {
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [livePrices, setLivePrices] = useState<Record<string, LivePrice>>({});
+  const [manualPrices, setManualPrices] = useState<Record<string, number>>(loadManualPrices);
+  const [editingPrice, setEditingPrice] = useState<string | null>(null); // ticker being edited
+  const [priceInput, setPriceInput] = useState('');
+  const priceInputRef = useRef<HTMLInputElement>(null);
   const [form, setForm] = useState(defaultForm);
   const [loading, setLoading] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
@@ -75,6 +88,34 @@ export default function PortfolioRisk() {
       }
     });
   }, [holdings]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Focus the price input when it appears
+  useEffect(() => {
+    if (editingPrice) priceInputRef.current?.focus();
+  }, [editingPrice]);
+
+  function startEditPrice(ticker: string, currentVal: number) {
+    setEditingPrice(ticker);
+    setPriceInput(currentVal > 0 ? currentVal.toFixed(4) : '');
+  }
+
+  function commitPrice(ticker: string) {
+    const val = parseFloat(priceInput);
+    if (!isNaN(val) && val > 0) {
+      const updated = { ...manualPrices, [ticker]: val };
+      setManualPrices(updated);
+      saveManualPrices(updated);
+    }
+    setEditingPrice(null);
+  }
+
+  function clearManualPrice(ticker: string) {
+    const updated = { ...manualPrices };
+    delete updated[ticker];
+    setManualPrices(updated);
+    saveManualPrices(updated);
+    setEditingPrice(null);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -128,12 +169,16 @@ export default function PortfolioRisk() {
 
   const enriched = holdings.map((h) => {
     const lp = livePrices[h.ticker];
-    const currentPrice = lp?.price ?? h.avg_cost;
+    const finnhubPrice = lp?.price && lp.price > 0 ? lp.price : null;
+    // Manual price overrides Finnhub; fall back to avg_cost only as last resort
+    const currentPrice = manualPrices[h.ticker] ?? finnhubPrice ?? h.avg_cost;
+    const priceSource: 'manual' | 'live' | 'cost' =
+      manualPrices[h.ticker] ? 'manual' : finnhubPrice ? 'live' : 'cost';
     const marketValue = h.shares * currentPrice;
     const costBasis = h.shares * h.avg_cost;
     const pnl = marketValue - costBasis;
     const pnlPct = costBasis > 0 ? (pnl / costBasis) * 100 : 0;
-    return { ...h, currentPrice, marketValue, costBasis, pnl, pnlPct, changePct: lp?.changePct ?? 0 };
+    return { ...h, currentPrice, priceSource, marketValue, costBasis, pnl, pnlPct, changePct: lp?.changePct ?? 0 };
   });
 
   const totalValue = enriched.reduce((s, h) => s + h.marketValue, 0);
@@ -270,6 +315,10 @@ export default function PortfolioRisk() {
               </div>
             </div>
 
+            <p className="text-xs text-zinc-600 mb-3">
+              Click any price in the <span className="text-zinc-400">Current</span> column to enter it manually.
+              <span className="text-amber-500 font-semibold ml-2">M</span> = manual override · orange <X size={10} className="inline" /> in actions clears it.
+            </p>
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
@@ -297,8 +346,38 @@ export default function PortfolioRisk() {
                       <td className="td text-xs text-zinc-500">{h.currency}</td>
                       <td className="td tabular-nums text-xs">{fmt(h.shares, 3)}</td>
                       <td className="td tabular-nums">{fmtCurrency(h.avg_cost)}</td>
-                      <td className="td tabular-nums">{fmtCurrency(h.currentPrice)}</td>
-                      <td className={`td tabular-nums text-xs font-medium ${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-400'}`}>{fmtPct(h.changePct)}</td>
+                      <td className="td tabular-nums">
+                        {editingPrice === h.ticker ? (
+                          <div className="flex items-center gap-1">
+                            <input
+                              ref={priceInputRef}
+                              type="number"
+                              step="0.0001"
+                              className="w-24 bg-zinc-700 border border-blue-500 rounded px-1.5 py-0.5 text-xs text-zinc-100 tabular-nums focus:outline-none"
+                              value={priceInput}
+                              onChange={(e) => setPriceInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') commitPrice(h.ticker);
+                                if (e.key === 'Escape') setEditingPrice(null);
+                              }}
+                            />
+                            <button onClick={() => commitPrice(h.ticker)} className="text-emerald-400 hover:text-emerald-300 p-0.5"><Check size={12} /></button>
+                            <button onClick={() => setEditingPrice(null)} className="text-zinc-500 hover:text-zinc-300 p-0.5"><X size={12} /></button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => startEditPrice(h.ticker, h.currentPrice)}
+                            className="group flex items-center gap-1.5 hover:text-blue-300 transition-colors"
+                            title={h.priceSource === 'manual' ? 'Manual price — click to edit' : h.priceSource === 'cost' ? 'No live price — click to enter manually' : 'Live price — click to override'}
+                          >
+                            <span className={h.priceSource === 'cost' ? 'text-zinc-600' : ''}>{fmtCurrency(h.currentPrice)}</span>
+                            {h.priceSource === 'manual' && <span className="text-xs text-amber-500 font-semibold">M</span>}
+                            {h.priceSource === 'cost' && <span className="text-xs text-zinc-600">—</span>}
+                            <Pencil size={10} className="opacity-0 group-hover:opacity-60 text-zinc-400 transition-opacity" />
+                          </button>
+                        )}
+                      </td>
+                      <td className={`td tabular-nums text-xs font-medium ${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-400'}`}>{h.priceSource === 'manual' ? <span className="text-zinc-600">—</span> : fmtPct(h.changePct)}</td>
                       <td className="td tabular-nums font-medium">{fmtCurrency(h.marketValue)}</td>
                       <td className={`td tabular-nums font-medium ${h.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         {fmtCurrency(h.pnl)}<br /><span className="text-xs">{fmtPct(h.pnlPct)}</span>
@@ -315,8 +394,13 @@ export default function PortfolioRisk() {
                       <td className="td"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${liquidityBg[h.liquidity_risk]}`}>{h.liquidity_risk}</span></td>
                       <td className="td">
                         <div className="flex gap-1">
-                          <button onClick={() => startEdit(h)} className="btn-ghost p-1"><Edit2 size={12} /></button>
-                          <button onClick={() => handleDelete(h.id)} className="btn-danger"><Trash2 size={12} /></button>
+                          <button onClick={() => startEdit(h)} className="btn-ghost p-1" title="Edit holding"><Edit2 size={12} /></button>
+                          {h.priceSource === 'manual' && (
+                            <button onClick={() => clearManualPrice(h.ticker)} className="btn-ghost p-1 text-amber-500 hover:text-amber-300" title="Clear manual price">
+                              <X size={12} />
+                            </button>
+                          )}
+                          <button onClick={() => handleDelete(h.id)} className="btn-danger" title="Delete holding"><Trash2 size={12} /></button>
                         </div>
                       </td>
                     </tr>
