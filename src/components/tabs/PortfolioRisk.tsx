@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Trash2, Edit2, X, Check, Pencil } from 'lucide-react';
+import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
@@ -7,8 +7,8 @@ import { fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import type { Holding, LiquidityRisk, Account, Currency } from '../../types';
 
 const MANUAL_PRICES_KEY = 'swing_manual_prices';
-
 const TABLE = 'portfolio_holdings';
+const DEFAULT_RATE = 1.38;
 
 const SECTORS = [
   'Technology', 'Healthcare', 'Financials', 'Consumer Discretionary',
@@ -60,13 +60,25 @@ function saveManualPrices(prices: Record<string, number>) {
   localStorage.setItem(MANUAL_PRICES_KEY, JSON.stringify(prices));
 }
 
+function fmtCAD(n: number) {
+  return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 2 }).format(n);
+}
+
 export default function PortfolioRisk() {
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [livePrices, setLivePrices] = useState<Record<string, LivePrice>>({});
   const [manualPrices, setManualPrices] = useState<Record<string, number>>(loadManualPrices);
-  const [editingPrice, setEditingPrice] = useState<string | null>(null); // ticker being edited
+  const [editingPrice, setEditingPrice] = useState<string | null>(null);
   const [priceInput, setPriceInput] = useState('');
   const priceInputRef = useRef<HTMLInputElement>(null);
+
+  // USD/CAD exchange rate
+  const [usdCadRate, setUsdCadRate] = useState<number>(DEFAULT_RATE);
+  const [rateLoading, setRateLoading] = useState(false);
+  const [editingRate, setEditingRate] = useState(false);
+  const [rateInput, setRateInput] = useState('');
+  const rateInputRef = useRef<HTMLInputElement>(null);
+
   const [form, setForm] = useState(defaultForm);
   const [loading, setLoading] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
@@ -79,6 +91,29 @@ export default function PortfolioRisk() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Fetch live USD/CAD rate on mount
+  async function fetchRate() {
+    setRateLoading(true);
+    try {
+      const q = await finnhub.quote('OANDA:USD_CAD');
+      if (q.c && q.c > 0) setUsdCadRate(q.c);
+    } catch { /* keep default */ } finally {
+      setRateLoading(false);
+    }
+  }
+  useEffect(() => { fetchRate(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (editingRate) rateInputRef.current?.focus();
+  }, [editingRate]);
+
+  function commitRate() {
+    const v = parseFloat(rateInput);
+    if (!isNaN(v) && v > 0) setUsdCadRate(v);
+    setEditingRate(false);
+  }
+
+  // Fetch stock prices
   useEffect(() => {
     holdings.forEach((h) => {
       if (!livePrices[h.ticker]) {
@@ -89,7 +124,6 @@ export default function PortfolioRisk() {
     });
   }, [holdings]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Focus the price input when it appears
   useEffect(() => {
     if (editingPrice) priceInputRef.current?.focus();
   }, [editingPrice]);
@@ -167,46 +201,66 @@ export default function PortfolioRisk() {
     await load();
   }
 
+  // Enrich each holding — native currency values + CAD equivalents
+  const toCAD = (val: number, cur: Currency) => cur === 'USD' ? val * usdCadRate : val;
+
   const enriched = holdings.map((h) => {
     const lp = livePrices[h.ticker];
     const finnhubPrice = lp?.price && lp.price > 0 ? lp.price : null;
-    // Manual price overrides Finnhub; fall back to avg_cost only as last resort
     const currentPrice = manualPrices[h.ticker] ?? finnhubPrice ?? h.avg_cost;
     const priceSource: 'manual' | 'live' | 'cost' =
       manualPrices[h.ticker] ? 'manual' : finnhubPrice ? 'live' : 'cost';
-    const marketValue = h.shares * currentPrice;
-    const costBasis = h.shares * h.avg_cost;
-    const pnl = marketValue - costBasis;
-    const pnlPct = costBasis > 0 ? (pnl / costBasis) * 100 : 0;
-    return { ...h, currentPrice, priceSource, marketValue, costBasis, pnl, pnlPct, changePct: lp?.changePct ?? 0 };
+
+    const marketValue = h.shares * currentPrice;           // native currency
+    const costBasis   = h.shares * h.avg_cost;             // native currency
+    const pnl         = marketValue - costBasis;            // native currency
+    const pnlPct      = costBasis > 0 ? (pnl / costBasis) * 100 : 0;
+
+    const cadMarketValue = toCAD(marketValue, h.currency);
+    const cadCostBasis   = toCAD(costBasis, h.currency);
+    const cadPnl         = cadMarketValue - cadCostBasis;
+
+    return {
+      ...h, currentPrice, priceSource,
+      marketValue, costBasis, pnl, pnlPct,
+      cadMarketValue, cadCostBasis, cadPnl,
+      changePct: lp?.changePct ?? 0,
+    };
   });
 
-  const totalValue = enriched.reduce((s, h) => s + h.marketValue, 0);
-  const totalCost = enriched.reduce((s, h) => s + h.costBasis, 0);
-  const totalPnL = totalValue - totalCost;
+  // Allocation % relative to TOTAL portfolio in CAD (all accounts)
+  const totalPortfolioCAD = enriched.reduce((s, h) => s + h.cadMarketValue, 0);
 
   const withAlloc = enriched.map((h) => ({
     ...h,
-    allocationPct: totalValue > 0 ? (h.marketValue / totalValue) * 100 : 0,
+    allocationPct: totalPortfolioCAD > 0 ? (h.cadMarketValue / totalPortfolioCAD) * 100 : 0,
   }));
 
   // Filter by account
   const filtered = filterAccount === 'ALL' ? withAlloc : withAlloc.filter((h) => h.account === filterAccount);
 
-  // Account breakdown for display
+  // Summary stats scoped to the filtered (account) view — always in CAD
+  const summaryValueCAD = filtered.reduce((s, h) => s + h.cadMarketValue, 0);
+  const summaryCostCAD  = filtered.reduce((s, h) => s + h.cadCostBasis, 0);
+  const summaryPnLCAD   = summaryValueCAD - summaryCostCAD;
+  const summaryPnLPct   = summaryCostCAD > 0 ? (summaryPnLCAD / summaryCostCAD) * 100 : 0;
+
+  // Account breakdown (all accounts, CAD)
   const accountMap: Record<string, number> = {};
   withAlloc.forEach((h) => {
-    accountMap[h.account] = (accountMap[h.account] ?? 0) + h.marketValue;
+    accountMap[h.account] = (accountMap[h.account] ?? 0) + h.cadMarketValue;
   });
 
-  // Sector breakdown for pie chart
+  // Sector pie uses filtered view in CAD
   const sectorMap: Record<string, number> = {};
-  withAlloc.forEach((h) => {
-    sectorMap[h.sector] = (sectorMap[h.sector] ?? 0) + h.allocationPct;
+  filtered.forEach((h) => {
+    sectorMap[h.sector] = (sectorMap[h.sector] ?? 0) + h.cadMarketValue;
   });
-  const pieData = Object.entries(sectorMap).map(([name, value]) => ({ name, value: +value.toFixed(1) }));
+  const sectorTotal = Object.values(sectorMap).reduce((s, v) => s + v, 0);
+  const pieData = Object.entries(sectorMap)
+    .map(([name, val]) => ({ name, value: +(sectorTotal > 0 ? (val / sectorTotal) * 100 : 0).toFixed(1) }));
 
-  const maxAlloc = withAlloc.reduce((m, h) => Math.max(m, h.allocationPct), 0);
+  const maxAlloc = filtered.reduce((m, h) => Math.max(m, h.allocationPct), 0);
   const concentrationRisk = maxAlloc > 30 ? 'HIGH' : maxAlloc > 20 ? 'MEDIUM' : 'LOW';
 
   const tickers = withAlloc.map((h) => h.ticker);
@@ -228,6 +282,7 @@ export default function PortfolioRisk() {
   }
 
   const uniqueAccounts = [...new Set(holdings.map((h) => h.account))];
+  const accountLabel = filterAccount === 'ALL' ? 'All Accounts' : filterAccount;
 
   return (
     <div className="space-y-6">
@@ -279,33 +334,83 @@ export default function PortfolioRisk() {
 
       {withAlloc.length > 0 && (
         <>
-          {/* Summary bar */}
+          {/* Exchange rate strip */}
+          <div className="flex items-center gap-3 px-1">
+            <span className="text-xs text-zinc-500">USD/CAD rate:</span>
+            {editingRate ? (
+              <div className="flex items-center gap-1">
+                <input
+                  ref={rateInputRef}
+                  type="number"
+                  step="0.0001"
+                  className="w-20 bg-zinc-800 border border-blue-500 rounded px-2 py-0.5 text-xs text-zinc-100 focus:outline-none"
+                  value={rateInput}
+                  onChange={(e) => setRateInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') commitRate(); if (e.key === 'Escape') setEditingRate(false); }}
+                />
+                <button onClick={commitRate} className="text-emerald-400 p-0.5"><Check size={12} /></button>
+                <button onClick={() => setEditingRate(false)} className="text-zinc-500 p-0.5"><X size={12} /></button>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setRateInput(usdCadRate.toFixed(4)); setEditingRate(true); }}
+                className="group flex items-center gap-1.5 text-xs text-zinc-300 hover:text-blue-300 transition-colors"
+              >
+                <span className="font-mono font-semibold">{usdCadRate.toFixed(4)}</span>
+                <Pencil size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
+              </button>
+            )}
+            <button
+              onClick={fetchRate}
+              disabled={rateLoading}
+              className="flex items-center gap-1 text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
+              title="Refresh live rate from Finnhub"
+            >
+              <RefreshCw size={11} className={rateLoading ? 'animate-spin' : ''} />
+              {rateLoading ? 'Fetching…' : 'Refresh'}
+            </button>
+            <span className="text-xs text-zinc-700">· All portfolio totals shown in CAD</span>
+          </div>
+
+          {/* Summary bar — scoped to selected account, always CAD */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             <div className="card py-3">
-              <div className="text-xs text-zinc-500 mb-1">Portfolio Value</div>
-              <div className="text-xl font-bold">{fmtCurrency(totalValue)}</div>
+              <div className="text-xs text-zinc-500 mb-1">
+                Portfolio Value
+                {filterAccount !== 'ALL' && <span className={`ml-1 font-semibold ${accountColors[filterAccount as Account]}`}>· {filterAccount}</span>}
+              </div>
+              <div className="text-xl font-bold">{fmtCAD(summaryValueCAD)}</div>
+              <div className="text-xs text-zinc-600 mt-0.5">{accountLabel}</div>
             </div>
             <div className="card py-3">
               <div className="text-xs text-zinc-500 mb-1">Total Cost Basis</div>
-              <div className="text-xl font-bold">{fmtCurrency(totalCost)}</div>
+              <div className="text-xl font-bold">{fmtCAD(summaryCostCAD)}</div>
+              <div className="text-xs text-zinc-600 mt-0.5">{accountLabel}</div>
             </div>
-            <div className={`card py-3 ${totalPnL >= 0 ? 'border-emerald-900' : 'border-red-900'}`}>
+            <div className={`card py-3 ${summaryPnLCAD >= 0 ? 'border-emerald-900' : 'border-red-900'}`}>
               <div className="text-xs text-zinc-500 mb-1">Unrealized P&L</div>
-              <div className={`text-xl font-bold ${totalPnL >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {totalPnL >= 0 ? '+' : ''}{fmtCurrency(totalPnL)}
+              <div className={`text-xl font-bold ${summaryPnLCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {summaryPnLCAD >= 0 ? '+' : ''}{fmtCAD(summaryPnLCAD)}
+              </div>
+              <div className={`text-xs mt-0.5 ${summaryPnLCAD >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                {summaryPnLPct >= 0 ? '+' : ''}{summaryPnLPct.toFixed(2)}%
               </div>
             </div>
             <div className="card py-3">
               <div className="text-xs text-zinc-500 mb-1">Holdings</div>
-              <div className="text-xl font-bold">{holdings.length} <span className="text-sm text-zinc-500 font-normal">across {uniqueAccounts.length} accounts</span></div>
+              <div className="text-xl font-bold">
+                {filtered.length}
+                <span className="text-sm text-zinc-500 font-normal"> / {holdings.length} total</span>
+              </div>
+              <div className="text-xs text-zinc-600 mt-0.5">{uniqueAccounts.length} accounts</div>
             </div>
           </div>
 
-          {/* Account breakdown */}
+          {/* Holdings table */}
           <div className="card">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-base font-semibold text-zinc-100">Holdings by Account</h2>
-              <div className="flex gap-1">
+              <div className="flex gap-1 flex-wrap">
                 {['ALL', ...uniqueAccounts].map((a) => (
                   <button key={a} onClick={() => setFilterAccount(a)}
                     className={`text-xs px-2.5 py-1 rounded-full border transition ${filterAccount === a ? 'bg-blue-900/50 text-blue-300 border-blue-700' : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'}`}>
@@ -317,8 +422,10 @@ export default function PortfolioRisk() {
 
             <p className="text-xs text-zinc-600 mb-3">
               Click any price in the <span className="text-zinc-400">Current</span> column to enter it manually.
-              <span className="text-amber-500 font-semibold ml-2">M</span> = manual override · orange <X size={10} className="inline" /> in actions clears it.
+              <span className="text-amber-500 font-semibold ml-2">M</span> = manual override.
+              Market Value and P&L shown in native currency; totals converted to CAD above.
             </p>
+
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
@@ -330,8 +437,9 @@ export default function PortfolioRisk() {
                     <th className="th">Avg Cost</th>
                     <th className="th">Current</th>
                     <th className="th">Day %</th>
-                    <th className="th">Market Value</th>
-                    <th className="th">P&L</th>
+                    <th className="th">Mkt Value</th>
+                    <th className="th">≈ CAD</th>
+                    <th className="th">P&L (native)</th>
                     <th className="th">Alloc %</th>
                     <th className="th">Sector</th>
                     <th className="th">Liquidity</th>
@@ -346,6 +454,8 @@ export default function PortfolioRisk() {
                       <td className="td text-xs text-zinc-500">{h.currency}</td>
                       <td className="td tabular-nums text-xs">{fmt(h.shares, 3)}</td>
                       <td className="td tabular-nums">{fmtCurrency(h.avg_cost)}</td>
+
+                      {/* Manual-editable current price */}
                       <td className="td tabular-nums">
                         {editingPrice === h.ticker ? (
                           <div className="flex items-center gap-1">
@@ -377,11 +487,30 @@ export default function PortfolioRisk() {
                           </button>
                         )}
                       </td>
-                      <td className={`td tabular-nums text-xs font-medium ${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-400'}`}>{h.priceSource === 'manual' ? <span className="text-zinc-600">—</span> : fmtPct(h.changePct)}</td>
-                      <td className="td tabular-nums font-medium">{fmtCurrency(h.marketValue)}</td>
-                      <td className={`td tabular-nums font-medium ${h.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {fmtCurrency(h.pnl)}<br /><span className="text-xs">{fmtPct(h.pnlPct)}</span>
+
+                      <td className={`td tabular-nums text-xs font-medium ${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-400'}`}>
+                        {h.priceSource === 'manual' ? <span className="text-zinc-600">—</span> : fmtPct(h.changePct)}
                       </td>
+
+                      {/* Market value — native currency */}
+                      <td className="td tabular-nums font-medium text-sm">
+                        {fmtCurrency(h.marketValue)}
+                        <span className="text-xs text-zinc-600 ml-1">{h.currency}</span>
+                      </td>
+
+                      {/* CAD equivalent */}
+                      <td className="td tabular-nums text-xs text-zinc-400">
+                        {h.currency === 'USD'
+                          ? fmtCAD(h.cadMarketValue)
+                          : <span className="text-zinc-600">—</span>}
+                      </td>
+
+                      {/* P&L native */}
+                      <td className={`td tabular-nums font-medium ${h.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {h.pnl >= 0 ? '+' : ''}{fmtCurrency(h.pnl)}
+                        <br /><span className="text-xs">{fmtPct(h.pnlPct)}</span>
+                      </td>
+
                       <td className="td">
                         <div className="flex items-center gap-2">
                           <div className="flex-1 bg-zinc-700 rounded-full h-1.5 w-12">
@@ -400,7 +529,7 @@ export default function PortfolioRisk() {
                               <X size={12} />
                             </button>
                           )}
-                          <button onClick={() => handleDelete(h.id)} className="btn-danger" title="Delete holding"><Trash2 size={12} /></button>
+                          <button onClick={() => handleDelete(h.id)} className="btn-danger" title="Delete"><Trash2 size={12} /></button>
                         </div>
                       </td>
                     </tr>
@@ -413,7 +542,8 @@ export default function PortfolioRisk() {
           {/* Charts */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="card">
-              <h2 className="text-base font-semibold text-zinc-100 mb-4">Sector Allocation</h2>
+              <h2 className="text-base font-semibold text-zinc-100 mb-1">Sector Allocation</h2>
+              <p className="text-xs text-zinc-600 mb-3">{accountLabel} · % of CAD value</p>
               <ResponsiveContainer width="100%" height={280}>
                 <PieChart>
                   <Pie data={pieData} cx="50%" cy="50%" outerRadius={100} dataKey="value" label={({ value }) => `${value.toFixed(1)}%`} labelLine={false}>
@@ -426,19 +556,24 @@ export default function PortfolioRisk() {
             </div>
 
             <div className="space-y-4">
-              {/* Account breakdown */}
+              {/* Account breakdown in CAD */}
               <div className="card">
-                <h2 className="text-sm font-semibold text-zinc-100 mb-3">Account Breakdown</h2>
+                <h2 className="text-sm font-semibold text-zinc-100 mb-1">Account Breakdown</h2>
+                <p className="text-xs text-zinc-600 mb-3">All accounts · CAD</p>
                 {Object.entries(accountMap).sort((a, b) => b[1] - a[1]).map(([acct, val]) => (
                   <div key={acct} className="flex items-center gap-2 text-xs mb-2">
                     <span className={`w-20 font-semibold ${accountColors[acct as Account]}`}>{acct}</span>
                     <div className="flex-1 bg-zinc-700 rounded-full h-2">
-                      <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${totalValue > 0 ? (val / totalValue) * 100 : 0}%` }} />
+                      <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${totalPortfolioCAD > 0 ? (val / totalPortfolioCAD) * 100 : 0}%` }} />
                     </div>
-                    <span className="text-zinc-400 w-24 text-right">{fmtCurrency(val)}</span>
-                    <span className="text-zinc-600 w-10 text-right">{totalValue > 0 ? fmt((val / totalValue) * 100, 1) : '0'}%</span>
+                    <span className="text-zinc-400 w-28 text-right tabular-nums">{fmtCAD(val)}</span>
+                    <span className="text-zinc-600 w-10 text-right">{totalPortfolioCAD > 0 ? fmt((val / totalPortfolioCAD) * 100, 1) : '0'}%</span>
                   </div>
                 ))}
+                <div className="border-t border-zinc-800 mt-2 pt-2 flex justify-between text-xs">
+                  <span className="text-zinc-500">Total portfolio</span>
+                  <span className="font-bold tabular-nums">{fmtCAD(totalPortfolioCAD)}</span>
+                </div>
               </div>
 
               {/* Concentration */}
@@ -448,7 +583,7 @@ export default function PortfolioRisk() {
                   {[
                     { label: 'Max single position', value: `${fmt(maxAlloc, 1)}%` },
                     { label: 'Concentration Risk', value: concentrationRisk, colored: true },
-                    { label: 'Holdings', value: `${holdings.length}` },
+                    { label: 'Holdings shown', value: `${filtered.length}` },
                     { label: 'Sectors', value: `${Object.keys(sectorMap).length}` },
                   ].map(({ label, value, colored }) => (
                     <div key={label} className="flex justify-between text-sm">
@@ -462,7 +597,7 @@ export default function PortfolioRisk() {
                   ))}
                 </div>
                 <div className="mt-3 space-y-1">
-                  {withAlloc.sort((a, b) => b.allocationPct - a.allocationPct).slice(0, 8).map((h) => (
+                  {[...filtered].sort((a, b) => b.allocationPct - a.allocationPct).slice(0, 8).map((h) => (
                     <div key={h.id} className="flex items-center gap-2 text-xs">
                       <span className="font-mono text-blue-400 w-14 flex-shrink-0">{h.ticker}</span>
                       <div className="flex-1 bg-zinc-700 rounded-full h-1.5">
@@ -486,13 +621,13 @@ export default function PortfolioRisk() {
                   <thead>
                     <tr>
                       <th className="w-16" />
-                      {tickers.map((t) => <th key={t} className="text-center font-mono text-zinc-400 pb-2 px-0.5 min-w-10">{t.slice(0,4)}</th>)}
+                      {tickers.map((t) => <th key={t} className="text-center font-mono text-zinc-400 pb-2 px-0.5 min-w-10">{t.slice(0, 4)}</th>)}
                     </tr>
                   </thead>
                   <tbody>
                     {tickers.map((rowT) => (
                       <tr key={rowT}>
-                        <td className="font-mono text-zinc-400 pr-2 py-0.5 text-xs">{rowT.slice(0,6)}</td>
+                        <td className="font-mono text-zinc-400 pr-2 py-0.5 text-xs">{rowT.slice(0, 6)}</td>
                         {tickers.map((colT) => {
                           const v = sectorCorr(rowT, colT);
                           return (
