@@ -39,6 +39,7 @@ export default function WatchList() {
   const [analystTarget, setAnalystTarget] = useState('');
   const [targetEntry, setTargetEntry] = useState('');
   const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
   const [fetchingPrice, setFetchingPrice] = useState(false);
   const [sortConviction, setSortConviction] = useState(true);
 
@@ -87,6 +88,7 @@ export default function WatchList() {
     e.preventDefault();
     if (!ticker.trim()) return;
     setAdding(true);
+    setAddError(null);
     try {
       // If no price entered, try to fetch it
       let price: number | null = watchPrice ? parseFloat(watchPrice) : null;
@@ -117,6 +119,9 @@ export default function WatchList() {
       setAnalystTarget('');
       setTargetEntry('');
       await load();
+    } catch (err: any) {
+      console.error('[WatchList] Insert error:', err);
+      setAddError(err?.message ?? JSON.stringify(err));
     } finally {
       setAdding(false);
     }
@@ -222,6 +227,11 @@ export default function WatchList() {
             {adding ? 'Adding...' : 'Add'}
           </button>
         </form>
+        {addError && (
+          <div className="mt-2 text-xs text-red-400 bg-red-950/40 border border-red-800 rounded p-2">
+            Error: {addError}
+          </div>
+        )}
         <p className="text-xs text-zinc-600 mt-2">
           Watch price auto-fills from Finnhub when you tab out of the ticker field. You can also enter it manually.
         </p>
