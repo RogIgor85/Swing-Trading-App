@@ -3,6 +3,7 @@ import { Plus, Trash2, RefreshCw, TrendingUp, TrendingDown, Minus } from 'lucide
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
+import FundamentalsDrawer from '../FundamentalsDrawer';
 import { toYahooTicker } from '../FundamentalsDrawer';
 import { changeColor, fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import type { WatchItem, FinnhubQuote, FinnhubSentiment, Conviction } from '../../types';
@@ -43,6 +44,7 @@ export default function WatchList() {
   const [adding, setAdding] = useState(false);
   const [fetchingPrice, setFetchingPrice] = useState(false);
   const [sortConviction, setSortConviction] = useState(true);
+  const [drawer, setDrawer] = useState<{ ticker: string; currency: string } | null>(null);
 
   const load = useCallback(async () => {
     const data = await storage.getAll<WatchItem>(TABLE);
@@ -317,7 +319,13 @@ export default function WatchList() {
                   <div className="flex items-center gap-4 flex-wrap">
                     {/* Ticker & conviction */}
                     <div className="w-28 flex-shrink-0">
-                      <div className="font-mono font-bold text-blue-400 text-base">{item.ticker}</div>
+                      <button
+                        onClick={() => setDrawer({ ticker: item.ticker, currency: 'USD' })}
+                        className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 transition-colors text-base text-left"
+                        title={`View fundamentals for ${item.ticker}`}
+                      >
+                        {item.ticker}
+                      </button>
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${convictionBg[item.conviction]}`}>
                         {item.conviction}
                       </span>
@@ -461,6 +469,9 @@ export default function WatchList() {
           </div>
         )}
       </div>
+      {drawer && (
+        <FundamentalsDrawer ticker={drawer.ticker} currency={drawer.currency} onClose={() => setDrawer(null)} />
+      )}
     </div>
   );
 }

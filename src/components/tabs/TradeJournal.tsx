@@ -478,8 +478,6 @@ export default function TradeJournal() {
                   <th className="th">Cur</th>
                   <th className="th">Qty</th>
                   <th className="th">Entry</th>
-                  <th className="th">Stop</th>
-                  <th className="th">Position $</th>
                   <th className="th">Exit Date</th>
                   <th className="th">Exit Price</th>
                   <th className="th">P&L</th>
@@ -513,8 +511,6 @@ export default function TradeJournal() {
                     <td className="td text-xs text-zinc-500">{t.currency}</td>
                     <td className="td tabular-nums text-xs">{fmt(t.qty, 0)}</td>
                     <td className="td tabular-nums">{fmtCurrency(t.entry_price)}</td>
-                    <td className="td tabular-nums text-zinc-500 text-xs">{t.stop_loss ? fmtCurrency(t.stop_loss) : '—'}</td>
-                    <td className="td tabular-nums text-xs">{t.position_size ? fmtCurrency(t.position_size) : '—'}</td>
                     <td className="td text-zinc-400 text-xs">{t.date_of_sale ?? '—'}</td>
                     <td className="td tabular-nums">
                       {t.avg_exit_price ? fmtCurrency(t.avg_exit_price) : (

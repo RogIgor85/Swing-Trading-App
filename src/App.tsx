@@ -14,9 +14,9 @@ const TABS = [
   { id: 'scorecard', label: 'Scorecard', icon: Layers },
   { id: 'watchlist', label: 'Watch List', icon: Eye },
   { id: 'technical', label: 'Chart Analysis', icon: ScanLine },
-  { id: 'portfolio', label: 'Portfolio Risk', icon: PieChart },
-  { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
+  { id: 'portfolio', label: 'Portfolio', icon: PieChart },
   { id: 'journal', label: 'Trade Journal', icon: ClipboardList },
+  { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];

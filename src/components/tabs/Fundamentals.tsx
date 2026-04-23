@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { Search, Save, Trash2, RefreshCw, ExternalLink } from 'lucide-react';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
+import { fetchYahoo } from '../../lib/yahoo';
+import { toYahooTicker } from '../FundamentalsDrawer';
 import { fmt, fmtCurrency, fmtPct } from '../../lib/utils';
 import type {
   FundamentalNote,
@@ -34,6 +36,7 @@ export default function Fundamentals() {
   const [noteText, setNoteText] = useState('');
   const [saving, setSaving] = useState(false);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
+  const [livePrice, setLivePrice] = useState<{ price: number; change: number; changePct: number; volume: number } | null>(null);
 
   const load = useCallback(async () => {
     const d = await storage.getAll<FundamentalNote>(TABLE);
@@ -47,6 +50,22 @@ export default function Fundamentals() {
     if (!t) return;
     setActiveTicker(t);
     setData({ loading: true });
+    setLivePrice(null);
+    // Fetch live price from Yahoo
+    fetchYahoo(toYahooTicker(t, 'USD')).then((y) => {
+      const price = y.price?.regularMarketPrice;
+      const change = y.price?.regularMarketChange;
+      const changePct = y.price?.regularMarketChangePercent;
+      const volume = y.price?.regularMarketVolume;
+      if (price) {
+        setLivePrice({
+          price,
+          change: change ?? 0,
+          changePct: (changePct ?? 0) * 100,
+          volume: volume ?? 0,
+        });
+      }
+    }).catch(() => {});
     try {
       const [profile, metrics, earnings, epsEst, revEst, sentiment] = await Promise.allSettled([
         finnhub.profile(t),
@@ -207,6 +226,33 @@ export default function Fundamentals() {
                 )}
               </div>
             </div>
+
+            {livePrice && (
+              <div className="flex items-center gap-4 mb-4 p-3 bg-zinc-800/40 rounded-lg">
+                <div>
+                  <div className="text-xs text-zinc-500 mb-0.5">Current Price</div>
+                  <div className="text-2xl font-bold tabular-nums text-zinc-100">${livePrice.price.toFixed(2)}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-zinc-500 mb-0.5">Day Change</div>
+                  <div className={`text-sm font-semibold tabular-nums ${livePrice.changePct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {livePrice.changePct >= 0 ? '+' : ''}{livePrice.change.toFixed(2)} ({livePrice.changePct >= 0 ? '+' : ''}{livePrice.changePct.toFixed(2)}%)
+                  </div>
+                </div>
+                {livePrice.volume > 0 && (
+                  <div>
+                    <div className="text-xs text-zinc-500 mb-0.5">Volume</div>
+                    <div className="text-sm font-semibold tabular-nums text-zinc-300">
+                      {livePrice.volume >= 1_000_000
+                        ? `${(livePrice.volume / 1_000_000).toFixed(2)}M`
+                        : livePrice.volume >= 1_000
+                        ? `${(livePrice.volume / 1_000).toFixed(0)}K`
+                        : livePrice.volume.toLocaleString()}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Key metrics grid */}
             {m && (

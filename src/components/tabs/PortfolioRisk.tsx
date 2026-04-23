@@ -88,6 +88,9 @@ export default function PortfolioRisk() {
   const [loading, setLoading] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [filterAccount, setFilterAccount] = useState<string>('ALL');
+  const [sellId, setSellId] = useState<string | null>(null);
+  const [sellForm, setSellForm] = useState({ exitPrice: '', qtySold: '', dateSold: new Date().toISOString().split('T')[0] });
+  const [sellLoading, setSellLoading] = useState(false);
 
   const load = useCallback(async () => {
     const data = await storage.getAll<Holding>(TABLE);
@@ -219,6 +222,62 @@ export default function PortfolioRisk() {
   async function handleDelete(id: string) {
     await storage.remove(TABLE, id);
     await load();
+  }
+
+  async function handleSell(h: typeof withAlloc[0]) {
+    setSellLoading(true);
+    try {
+      const exitPrice = parseFloat(sellForm.exitPrice);
+      const qtySold = parseFloat(sellForm.qtySold) || h.shares;
+      if (!exitPrice || exitPrice <= 0) return;
+
+      const realizedPnl = (exitPrice - h.avg_cost) * qtySold;
+      const realizedPct = h.avg_cost > 0 ? realizedPnl / (h.avg_cost * qtySold) : 0;
+
+      // Create Trade Journal closed entry
+      const journalEntry = {
+        id: newId(),
+        sr_no: 0,
+        date_of_buy: h.created_at?.split('T')[0] ?? sellForm.dateSold,
+        account: h.account,
+        ticker: h.ticker,
+        company: '',
+        industry: h.sector,
+        period: 'Swing',
+        strategy: 'Swing 1-15 days',
+        currency: h.currency,
+        qty: qtySold,
+        entry_price: h.avg_cost,
+        stop_loss: null,
+        position_size: h.avg_cost * qtySold,
+        date_of_sale: sellForm.dateSold,
+        exit_qty: qtySold,
+        exit_price: exitPrice,
+        net_qty: 0,
+        avg_exit_price: exitPrice,
+        realized_pnl: realizedPnl,
+        realized_pnl_pct: realizedPct,
+        win_loss: realizedPnl >= 0 ? 'WIN' as const : 'LOSS' as const,
+        status: 'CLOSED' as const,
+        notes: `Sold from Portfolio`,
+        created_at: nowIso(),
+      };
+      await storage.insert('trade_journal', journalEntry);
+
+      // Update or remove holding
+      const remainingShares = h.shares - qtySold;
+      if (remainingShares <= 0.001) {
+        await storage.remove(TABLE, h.id);
+      } else {
+        await storage.update(TABLE, h.id, { shares: remainingShares });
+      }
+
+      setSellId(null);
+      setSellForm({ exitPrice: '', qtySold: '', dateSold: new Date().toISOString().split('T')[0] });
+      await load();
+    } finally {
+      setSellLoading(false);
+    }
   }
 
   async function handleClearAll() {
@@ -475,11 +534,9 @@ export default function PortfolioRisk() {
                     <th className="th">Current</th>
                     <th className="th">Day %</th>
                     <th className="th">Mkt Value</th>
-                    <th className="th">≈ CAD</th>
                     <th className="th">P&L (native)</th>
                     <th className="th">Alloc %</th>
                     <th className="th">Sector</th>
-                    <th className="th">Liquidity</th>
                     <th className="th" />
                   </tr>
                 </thead>
@@ -554,13 +611,6 @@ export default function PortfolioRisk() {
                         <span className="text-xs text-zinc-600 ml-1">{h.currency}</span>
                       </td>
 
-                      {/* CAD equivalent */}
-                      <td className="td tabular-nums text-xs text-zinc-400">
-                        {h.currency === 'USD'
-                          ? fmtCAD(h.cadMarketValue)
-                          : <span className="text-zinc-600">—</span>}
-                      </td>
-
                       {/* P&L native */}
                       <td className={`td tabular-nums font-medium ${h.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         {h.pnl >= 0 ? '+' : ''}{fmtCurrency(h.pnl)}
@@ -576,12 +626,34 @@ export default function PortfolioRisk() {
                         </div>
                       </td>
                       <td className="td text-xs text-zinc-400">{h.sector}</td>
-                      <td className="td"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${liquidityBg[h.liquidity_risk]}`}>{h.liquidity_risk}</span></td>
                       <td className="td">
-                        <div className="flex gap-1">
-                          <button onClick={() => startEdit(h)} className="btn-ghost p-1" title="Edit holding"><Edit2 size={12} /></button>
-                          <button onClick={() => handleDelete(h.id)} className="btn-danger" title="Delete"><Trash2 size={12} /></button>
-                        </div>
+                        {sellId === h.id ? (
+                          <div className="flex items-center gap-1 flex-wrap">
+                            <input type="number" step="0.0001" placeholder="Exit $" value={sellForm.exitPrice}
+                              onChange={(e) => setSellForm({ ...sellForm, exitPrice: e.target.value })}
+                              className="w-20 bg-zinc-700 border border-amber-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
+                            <input type="number" step="0.001" placeholder={`Qty (${h.shares})`} value={sellForm.qtySold}
+                              onChange={(e) => setSellForm({ ...sellForm, qtySold: e.target.value })}
+                              className="w-20 bg-zinc-700 border border-zinc-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
+                            <input type="date" value={sellForm.dateSold}
+                              onChange={(e) => setSellForm({ ...sellForm, dateSold: e.target.value })}
+                              className="w-28 bg-zinc-700 border border-zinc-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
+                            <button onClick={() => handleSell(h)} disabled={sellLoading}
+                              className="btn-primary text-xs px-2 py-1 flex items-center gap-1">
+                              <Check size={11} />{sellLoading ? '...' : 'Sell'}
+                            </button>
+                            <button onClick={() => setSellId(null)} className="btn-ghost p-1"><X size={11} /></button>
+                          </div>
+                        ) : (
+                          <div className="flex gap-1">
+                            <button onClick={() => { setSellId(h.id); setSellForm({ exitPrice: h.currentPrice.toFixed(2), qtySold: h.shares.toString(), dateSold: new Date().toISOString().split('T')[0] }); }}
+                              className="text-xs px-2 py-1 rounded border border-amber-700 text-amber-400 hover:bg-amber-900/30 transition-colors font-medium">
+                              Sell
+                            </button>
+                            <button onClick={() => startEdit(h)} className="btn-ghost p-1" title="Edit holding"><Edit2 size={12} /></button>
+                            <button onClick={() => handleDelete(h.id)} className="btn-danger" title="Delete"><Trash2 size={12} /></button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}
