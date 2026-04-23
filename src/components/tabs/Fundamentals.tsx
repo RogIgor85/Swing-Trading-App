@@ -11,7 +11,7 @@ import type {
   FinnhubSentiment,
 } from '../../types';
 
-const TABLE = 'fundamental_notes';
+const TABLE = 'fundamentals';
 
 interface FinnhubData {
   profile?: FinnhubProfile;

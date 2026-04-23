@@ -10,7 +10,7 @@ import FundamentalsDrawer from '../FundamentalsDrawer';
 import type { Holding, LiquidityRisk, Account, Currency } from '../../types';
 
 const MANUAL_PRICES_KEY = 'swing_manual_prices';
-const TABLE = 'portfolio_holdings';
+const TABLE = 'holdings';
 const DEFAULT_RATE = 1.38;
 
 const SECTORS = [

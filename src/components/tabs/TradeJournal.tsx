@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, Trash2, TrendingUp, TrendingDown, X, Edit2, Check, ExternalLink } from 'lucide-react';
+import { Plus, Trash2, TrendingUp, TrendingDown, X, Edit2, Check, ExternalLink, RefreshCw } from 'lucide-react';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine,
 } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
+import { finnhub } from '../../lib/finnhub';
+import { fetchYahoo } from '../../lib/yahoo';
+import { toYahooTicker } from '../FundamentalsDrawer';
 import { fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import FundamentalsDrawer from '../FundamentalsDrawer';
 import type { TradeJournalEntry, Account, Currency } from '../../types';
@@ -55,12 +58,47 @@ export default function TradeJournal() {
   const [filterAccount, setFilterAccount] = useState<string>('ALL');
   const [drawer, setDrawer]               = useState<{ ticker: string; currency: string } | null>(null);
 
+  const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+  const [pricesLoading, setPricesLoading] = useState(false);
+
   const load = useCallback(async () => {
     const data = await storage.getAll<TradeJournalEntry>(TABLE);
     setTrades(data);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  async function fetchPrice(ticker: string, currency: string): Promise<number | null> {
+    try {
+      const q = await finnhub.quote(ticker);
+      if (q.c && q.c > 0) return q.c;
+    } catch { /* try Yahoo */ }
+    try {
+      const yahooTicker = toYahooTicker(ticker, currency);
+      const y = await fetchYahoo(yahooTicker);
+      return y.price?.regularMarketPrice ?? null;
+    } catch { return null; }
+  }
+
+  async function refreshLivePrices() {
+    const openTrades = trades.filter((t) => t.status === 'OPEN');
+    if (openTrades.length === 0) return;
+    setPricesLoading(true);
+    const results = await Promise.all(
+      openTrades.map(async (t) => {
+        const price = await fetchPrice(t.ticker, t.currency);
+        return { ticker: t.ticker, price };
+      })
+    );
+    const map: Record<string, number> = {};
+    results.forEach(({ ticker, price }) => { if (price) map[ticker] = price; });
+    setLivePrices(map);
+    setPricesLoading(false);
+  }
+
+  useEffect(() => {
+    if (trades.length > 0) refreshLivePrices();
+  }, [trades]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function startEdit(t: TradeJournalEntry) {
     setEditId(t.id);
@@ -417,9 +455,15 @@ export default function TradeJournal() {
 
       {/* ── Trades table ─────────────────────────────────────────────────────── */}
       <div className="card">
-        <h2 className="text-base font-semibold text-zinc-100 mb-4">
-          Trade History <span className="text-zinc-600 text-sm font-normal">({filtered.length})</span>
-        </h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-zinc-100">
+            Trade History <span className="text-zinc-600 text-sm font-normal">({filtered.length})</span>
+          </h2>
+          <button onClick={refreshLivePrices} className="btn-ghost flex items-center gap-1.5 text-xs" title="Refresh live prices">
+            <RefreshCw size={12} className={pricesLoading ? 'animate-spin' : ''} />
+            Refresh prices
+          </button>
+        </div>
         {filtered.length === 0 ? (
           <p className="text-zinc-600 text-sm text-center py-8">No trades yet. Click <span className="text-zinc-400">Add Trade</span> to get started.</p>
         ) : (
@@ -472,12 +516,40 @@ export default function TradeJournal() {
                     <td className="td tabular-nums text-zinc-500 text-xs">{t.stop_loss ? fmtCurrency(t.stop_loss) : '—'}</td>
                     <td className="td tabular-nums text-xs">{t.position_size ? fmtCurrency(t.position_size) : '—'}</td>
                     <td className="td text-zinc-400 text-xs">{t.date_of_sale ?? '—'}</td>
-                    <td className="td tabular-nums">{t.avg_exit_price ? fmtCurrency(t.avg_exit_price) : '—'}</td>
-                    <td className={`td tabular-nums font-semibold ${(t.realized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {t.realized_pnl != null ? `${t.realized_pnl >= 0 ? '+' : ''}${fmtCurrency(t.realized_pnl)}` : '—'}
+                    <td className="td tabular-nums">
+                      {t.avg_exit_price ? fmtCurrency(t.avg_exit_price) : (
+                        t.status === 'OPEN' && livePrices[t.ticker]
+                          ? <span className="text-blue-300">{fmtCurrency(livePrices[t.ticker])}</span>
+                          : '—'
+                      )}
                     </td>
-                    <td className={`td tabular-nums text-xs font-medium ${(t.realized_pnl_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {t.realized_pnl_pct != null ? fmtPct(t.realized_pnl_pct * 100) : '—'}
+                    <td className={`td tabular-nums font-semibold ${
+                      t.status === 'OPEN'
+                        ? livePrices[t.ticker]
+                          ? (livePrices[t.ticker] - t.entry_price) * t.qty >= 0 ? 'text-emerald-400' : 'text-red-400'
+                          : 'text-zinc-500'
+                        : (t.realized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                    }`}>
+                      {t.status === 'OPEN'
+                        ? livePrices[t.ticker]
+                          ? (() => { const unreal = (livePrices[t.ticker] - t.entry_price) * t.qty; return `${unreal >= 0 ? '+' : ''}${fmtCurrency(unreal)}`; })()
+                          : <span className="text-zinc-600 text-xs">live…</span>
+                        : t.realized_pnl != null ? `${t.realized_pnl >= 0 ? '+' : ''}${fmtCurrency(t.realized_pnl)}` : '—'
+                      }
+                    </td>
+                    <td className={`td tabular-nums text-xs font-medium ${
+                      t.status === 'OPEN'
+                        ? livePrices[t.ticker]
+                          ? (livePrices[t.ticker] - t.entry_price) / t.entry_price >= 0 ? 'text-emerald-400' : 'text-red-400'
+                          : 'text-zinc-500'
+                        : (t.realized_pnl_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                    }`}>
+                      {t.status === 'OPEN'
+                        ? livePrices[t.ticker]
+                          ? fmtPct(((livePrices[t.ticker] - t.entry_price) / t.entry_price) * 100)
+                          : '—'
+                        : t.realized_pnl_pct != null ? fmtPct(t.realized_pnl_pct * 100) : '—'
+                      }
                     </td>
                     <td className="td">
                       {t.status === 'OPEN' ? (

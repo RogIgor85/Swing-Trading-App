@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { Plus, Trash2, RefreshCw, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
+import { fetchYahoo } from '../../lib/yahoo';
+import { toYahooTicker } from '../FundamentalsDrawer';
 import { changeColor, fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import type { WatchItem, FinnhubQuote, FinnhubSentiment, Conviction } from '../../types';
 
@@ -54,8 +56,14 @@ export default function WatchList() {
     if (!ticker.trim() || watchPrice) return;
     setFetchingPrice(true);
     try {
-      const q = await finnhub.quote(ticker.trim());
-      if (q.c) setWatchPrice(q.c.toFixed(2));
+      const t = ticker.trim().toUpperCase();
+      const q = await finnhub.quote(t);
+      if (q.c && q.c > 0) { setWatchPrice(q.c.toFixed(2)); return; }
+      // Fallback: Yahoo Finance (handles .TO and other exchange suffixes)
+      const yahooTicker = toYahooTicker(t, t.endsWith('.TO') || t.endsWith('.V') ? 'CAD' : 'USD');
+      const y = await fetchYahoo(yahooTicker);
+      const price = y.price?.regularMarketPrice ?? null;
+      if (price && price > 0) setWatchPrice(price.toFixed(2));
     } catch { /* ignore */ } finally {
       setFetchingPrice(false);
     }
@@ -64,11 +72,37 @@ export default function WatchList() {
   async function fetchLive(item: WatchItem) {
     setLiveData((prev) => ({ ...prev, [item.ticker]: { loading: true } }));
     try {
-      const [quote, sentiment] = await Promise.all([
-        finnhub.quote(item.ticker),
-        finnhub.sentiment(item.ticker).catch(() => undefined),
-      ]);
-      setLiveData((prev) => ({ ...prev, [item.ticker]: { quote, sentiment, loading: false } }));
+      // Try Finnhub first
+      const q = await finnhub.quote(item.ticker).catch(() => null);
+      const sentiment = await finnhub.sentiment(item.ticker).catch(() => undefined);
+
+      if (q && q.c && q.c > 0) {
+        setLiveData((prev) => ({ ...prev, [item.ticker]: { quote: q, sentiment, loading: false } }));
+        return;
+      }
+
+      // Yahoo Finance fallback for TSX and other exchanges
+      const isCAD = item.ticker.includes('.TO') || item.ticker.includes('.V') ||
+                    item.ticker.includes('.TSX') || item.ticker.includes('.CN');
+      const yahooTicker = toYahooTicker(item.ticker, isCAD ? 'CAD' : 'USD');
+      const y = await fetchYahoo(yahooTicker);
+      const price = y.price?.regularMarketPrice ?? null;
+      const changePct = y.price?.regularMarketChangePercent ?? null;
+
+      if (price && price > 0) {
+        const syntheticQuote: FinnhubQuote = {
+          c: price,
+          d: y.price?.regularMarketChange ?? 0,
+          dp: changePct ? changePct * 100 : 0,
+          h: y.price?.regularMarketDayHigh ?? price,
+          l: y.price?.regularMarketDayLow ?? price,
+          o: y.price?.regularMarketOpen ?? price,
+          pc: y.price?.regularMarketPreviousClose ?? price,
+        };
+        setLiveData((prev) => ({ ...prev, [item.ticker]: { quote: syntheticQuote, sentiment, loading: false } }));
+      } else {
+        setLiveData((prev) => ({ ...prev, [item.ticker]: { loading: false, error: 'No price data' } }));
+      }
     } catch {
       setLiveData((prev) => ({
         ...prev,
@@ -92,8 +126,15 @@ export default function WatchList() {
       let price: number | null = watchPrice ? parseFloat(watchPrice) : null;
       if (!price) {
         try {
-          const q = await finnhub.quote(ticker.trim());
-          price = q.c || null;
+          const t = ticker.trim().toUpperCase();
+          const q = await finnhub.quote(t);
+          if (q.c && q.c > 0) { price = q.c; }
+          else {
+            const isCAD = t.includes('.TO') || t.includes('.V') || t.includes('.TSX') || t.includes('.CN');
+            const yahooTicker = toYahooTicker(t, isCAD ? 'CAD' : 'USD');
+            const y = await fetchYahoo(yahooTicker);
+            price = y.price?.regularMarketPrice ?? null;
+          }
         } catch { /* leave null */ }
       }
 

@@ -5,7 +5,7 @@ import { finnhub } from '../../lib/finnhub';
 import { calcWeightedScore, getVerdict, verdictBg, fmt } from '../../lib/utils';
 import type { ScorecardEntry } from '../../types';
 
-const TABLE = 'scorecard_entries';
+const TABLE = 'scorecard';
 
 const CATEGORIES = [
   { key: 'technical_score', label: 'Technical', weight: '35%', description: 'Trend, pattern, MA alignment, momentum' },
