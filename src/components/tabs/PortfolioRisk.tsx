@@ -179,23 +179,54 @@ export default function PortfolioRisk() {
     if (!form.ticker || !form.shares || !form.avg_cost) return;
     setLoading(true);
     try {
-      const holding: Holding = {
-        id: editId ?? newId(),
-        ticker: form.ticker.toUpperCase(),
-        shares: parseFloat(form.shares),
-        avg_cost: parseFloat(form.avg_cost),
-        sector: form.sector,
-        account: form.account,
-        currency: form.currency,
-        liquidity_risk: form.liquidity_risk,
-        notes: form.notes,
-        created_at: nowIso(),
-      };
+      const newTicker  = form.ticker.toUpperCase();
+      const newShares  = parseFloat(form.shares);
+      const newCost    = parseFloat(form.avg_cost);
+
       if (editId) {
+        // Straight edit — just overwrite
+        const holding: Holding = {
+          id: editId,
+          ticker: newTicker,
+          shares: newShares,
+          avg_cost: newCost,
+          sector: form.sector,
+          account: form.account,
+          currency: form.currency,
+          liquidity_risk: form.liquidity_risk,
+          notes: form.notes,
+          created_at: nowIso(),
+        };
         await storage.update(TABLE, editId, holding);
         setEditId(null);
       } else {
-        await storage.insert(TABLE, holding);
+        // Check if this ticker + account already exists → average in
+        const existing = holdings.find(
+          (h) => h.ticker === newTicker && h.account === form.account && h.currency === form.currency
+        );
+        if (existing) {
+          // Weighted average cost
+          const totalShares  = existing.shares + newShares;
+          const newAvgCost   = (existing.shares * existing.avg_cost + newShares * newCost) / totalShares;
+          await storage.update(TABLE, existing.id, {
+            shares:   totalShares,
+            avg_cost: parseFloat(newAvgCost.toFixed(6)),
+          });
+        } else {
+          const holding: Holding = {
+            id: newId(),
+            ticker: newTicker,
+            shares: newShares,
+            avg_cost: newCost,
+            sector: form.sector,
+            account: form.account,
+            currency: form.currency,
+            liquidity_risk: form.liquidity_risk,
+            notes: form.notes,
+            created_at: nowIso(),
+          };
+          await storage.insert(TABLE, holding);
+        }
       }
       setForm(defaultForm);
       await load();
