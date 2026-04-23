@@ -69,7 +69,7 @@ export default function App() {
             <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-600">
               <TrendingUp size={16} className="text-white" />
             </div>
-            <h1 className="text-base font-semibold text-zinc-100">Swing Trading Dashboard</h1>
+            <h1 className="text-base font-semibold text-zinc-100">Trading Dashboard</h1>
 
             <div className="ml-auto flex items-center gap-3">
               {user && (
