@@ -108,7 +108,7 @@ export default function WatchList() {
         watch_date: watchDate,
         analyst_target: analystTarget ? parseFloat(analystTarget) : null,
         target_entry: targetEntry ? parseFloat(targetEntry) : null,
-        added_at: nowIso(),
+        created_at: nowIso(),
       };
       await storage.insert(TABLE, item);
       setTicker('');

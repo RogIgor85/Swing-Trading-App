@@ -29,7 +29,8 @@ export interface WatchItem {
   watch_date: string;
   analyst_target: number | null;
   target_entry: number | null;
-  added_at: string;
+  added_at?: string;
+  created_at?: string;
 }
 
 export interface TechnicalSetup {
