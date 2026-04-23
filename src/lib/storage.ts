@@ -1,5 +1,5 @@
 /**
- * Hybrid storage: Supabase when configured, localStorage fallback.
+ * Hybrid storage: Supabase when configured (with user scoping), localStorage fallback.
  * Each table maps to a localStorage key prefixed with "swing_".
  */
 import { supabase } from './supabase';
@@ -7,10 +7,19 @@ import { supabase } from './supabase';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
 
+async function getUserId(): Promise<string | null> {
+  if (!supabase) return null;
+  const { data } = await supabase.auth.getSession();
+  return data.session?.user?.id ?? null;
+}
+
 export const storage = {
   async getAll<T>(table: string): Promise<T[]> {
     if (supabase) {
-      const { data, error } = await supabase.from(table).select('*').order('created_at', { ascending: false });
+      const userId = await getUserId();
+      let query = supabase.from(table).select('*').order('created_at', { ascending: false });
+      if (userId) query = query.eq('user_id', userId);
+      const { data, error } = await query;
       if (error) throw error;
       return (data ?? []) as T[];
     }
@@ -21,8 +30,10 @@ export const storage = {
 
   async insert<T>(table: string, row: T): Promise<T> {
     if (supabase) {
+      const userId = await getUserId();
+      const rowWithUser = userId ? { ...(row as Row), user_id: userId } : row;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data, error } = await supabase.from(table).insert(row as any).select().single();
+      const { data, error } = await supabase.from(table).insert(rowWithUser as any).select().single();
       if (error) throw error;
       return data as T;
     }
