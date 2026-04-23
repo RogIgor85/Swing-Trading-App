@@ -5,7 +5,7 @@ import { finnhub } from '../../lib/finnhub';
 import { changeColor, fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import type { WatchItem, FinnhubQuote, FinnhubSentiment, Conviction } from '../../types';
 
-const TABLE = 'watchlist';
+const TABLE = 'watch_items';
 
 interface LiveData {
   quote?: FinnhubQuote;
