@@ -54,6 +54,8 @@ export interface YahooSummaryDetail {
 
 export interface YahooPrice {
   regularMarketPrice?: number | null;
+  regularMarketChange?: number | null;
+  regularMarketChangePercent?: number | null;
   regularMarketOpen?: number | null;
   regularMarketDayHigh?: number | null;
   regularMarketDayLow?: number | null;

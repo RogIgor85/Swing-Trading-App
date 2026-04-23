@@ -87,16 +87,15 @@ export default function WatchList() {
       const yahooTicker = toYahooTicker(item.ticker, isCAD ? 'CAD' : 'USD');
       const y = await fetchYahoo(yahooTicker);
       const price = y.price?.regularMarketPrice ?? null;
-      const changePct = y.price?.regularMarketChangePercent ?? null;
 
-      if (price && price > 0) {
+      if (price != null && price > 0) {
         const syntheticQuote: FinnhubQuote = {
-          c: price,
-          d: y.price?.regularMarketChange ?? 0,
-          dp: changePct ? changePct * 100 : 0,
-          h: y.price?.regularMarketDayHigh ?? price,
-          l: y.price?.regularMarketDayLow ?? price,
-          o: y.price?.regularMarketOpen ?? price,
+          c:  price,
+          d:  y.price?.regularMarketChange  ?? 0,
+          dp: (y.price?.regularMarketChangePercent ?? 0) * 100,
+          h:  y.price?.regularMarketDayHigh ?? price,
+          l:  y.price?.regularMarketDayLow  ?? price,
+          o:  y.price?.regularMarketOpen    ?? price,
           pc: y.price?.regularMarketPreviousClose ?? price,
         };
         setLiveData((prev) => ({ ...prev, [item.ticker]: { quote: syntheticQuote, sentiment, loading: false } }));
