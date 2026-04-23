@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { TrendingUp, Eye, BarChart2, PieChart, BookOpen, ClipboardList, Layers } from 'lucide-react';
+import { TrendingUp, Eye, ScanLine, PieChart, BookOpen, ClipboardList, Layers } from 'lucide-react';
 import TriFrameScorecard from './components/tabs/TriFrameScorecard';
 import WatchList from './components/tabs/WatchList';
-import TechnicalSetup from './components/tabs/TechnicalSetup';
+import ChartAnalysis from './components/tabs/ChartAnalysis';
 import PortfolioRisk from './components/tabs/PortfolioRisk';
 import Fundamentals from './components/tabs/Fundamentals';
 import TradeJournal from './components/tabs/TradeJournal';
@@ -10,7 +10,7 @@ import TradeJournal from './components/tabs/TradeJournal';
 const TABS = [
   { id: 'scorecard', label: 'Scorecard', icon: Layers },
   { id: 'watchlist', label: 'Watch List', icon: Eye },
-  { id: 'technical', label: 'Technical Setup', icon: BarChart2 },
+  { id: 'technical', label: 'Chart Analysis', icon: ScanLine },
   { id: 'portfolio', label: 'Portfolio Risk', icon: PieChart },
   { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
   { id: 'journal', label: 'Trade Journal', icon: ClipboardList },
@@ -58,7 +58,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-4 py-6">
         {activeTab === 'scorecard' && <TriFrameScorecard />}
         {activeTab === 'watchlist' && <WatchList />}
-        {activeTab === 'technical' && <TechnicalSetup />}
+        {activeTab === 'technical' && <ChartAnalysis />}
         {activeTab === 'portfolio' && <PortfolioRisk />}
         {activeTab === 'fundamentals' && <Fundamentals />}
         {activeTab === 'journal' && <TradeJournal />}
