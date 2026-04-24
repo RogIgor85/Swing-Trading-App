@@ -52,9 +52,10 @@ export default function WatchList() {
   const [buyId, setBuyId]         = useState<string | null>(null);
   const [buyShares, setBuyShares] = useState('');
   const [buyPrice, setBuyPrice]   = useState('');
-  const [buyAccount, setBuyAccount] = useState('TFSA');
+  const [buyAccount, setBuyAccount] = useState('Brokerage');
   const [buyCurrency, setBuyCurrency] = useState('USD');
   const [buyLoading, setBuyLoading] = useState(false);
+  const [buyError, setBuyError]   = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const data = await storage.getAll<WatchItem>(TABLE);
@@ -176,12 +177,13 @@ export default function WatchList() {
 
   function openBuyForm(item: WatchItem) {
     setBuyId(item.id);
+    setBuyError(null);
     setBuyShares('');
     const cp = liveData[item.ticker]?.quote?.c;
     setBuyPrice(cp ? cp.toFixed(2) : item.target_entry ? item.target_entry.toFixed(2) : '');
     const isCAD = item.ticker.includes('.TO') || item.ticker.includes('.V') || item.ticker.includes('.CN');
     setBuyCurrency(isCAD ? 'CAD' : 'USD');
-    setBuyAccount('TFSA');
+    setBuyAccount('Brokerage');
   }
 
   async function handleBuy(item: WatchItem) {
@@ -189,6 +191,7 @@ export default function WatchList() {
     const cost   = parseFloat(buyPrice);
     if (!shares || !cost || shares <= 0 || cost <= 0) return;
     setBuyLoading(true);
+    setBuyError(null);
     try {
       // Check for existing holding to merge
       const existing = (await storage.getAll<{
@@ -210,9 +213,11 @@ export default function WatchList() {
           ticker: item.ticker,
           shares,
           avg_cost: cost,
+          sector: 'Other',
           account: buyAccount,
           currency: buyCurrency,
-          added_date: new Date().toISOString().split('T')[0],
+          liquidity_risk: 'LOW',
+          notes: item.notes ?? '',
           created_at: nowIso(),
         });
       }
@@ -222,7 +227,9 @@ export default function WatchList() {
       setLiveData((prev) => { const n = { ...prev }; delete n[item.ticker]; return n; });
       setBuyId(null);
       await load();
-    } catch { /* ignore */ } finally {
+    } catch (err) {
+      setBuyError(err instanceof Error ? err.message : 'Failed to add to portfolio. Please try again.');
+    } finally {
       setBuyLoading(false);
     }
   }
@@ -603,7 +610,7 @@ export default function WatchList() {
                       <div>
                         <label className="label">Account</label>
                         <select className="select-base w-28" value={buyAccount} onChange={(e) => setBuyAccount(e.target.value)}>
-                          {['TFSA', 'RRSP', 'Margin', 'Cash', 'Other'].map((a) => (
+                          {['Brokerage', 'RRSP', 'LIRA', 'TSFA', 'HSA', 'Other'].map((a) => (
                             <option key={a} value={a}>{a}</option>
                           ))}
                         </select>
@@ -626,6 +633,9 @@ export default function WatchList() {
                       <p className="text-xs text-zinc-600 w-full mt-1">
                         This will add {item.ticker} to your Portfolio and remove it from the Watch List.
                       </p>
+                      {buyError && (
+                        <p className="text-xs text-red-400 w-full">{buyError}</p>
+                      )}
                     </div>
                   )}
                 </div>
