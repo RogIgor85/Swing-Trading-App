@@ -133,6 +133,44 @@ async function tryV7Quote(ticker: string): Promise<any> {
   } catch { return null; }
 }
 
+// ─── Layer E: fundamentals timeseries — short interest only ──────────────────
+// Uses a completely different Yahoo subdomain (ws.fundamentals-timeseries),
+// which is less likely to be IP-blocked than quoteSummary.
+async function tryShortInterest(ticker: string): Promise<number | null> {
+  try {
+    const now   = Math.floor(Date.now() / 1000);
+    const year  = now - 365 * 24 * 3600;
+    const url   = `https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${encodeURIComponent(ticker)}` +
+                  `?type=trailingShortPercentOfFloat&period1=${year}&period2=${now}&lang=en-US&region=US`;
+    const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
+    if (!r.ok) return null;
+    const j: any = await r.json();
+    // Response: { timeseries: { result: [{ trailingShortPercentOfFloat: [{reportedValue:{raw}}] }] } }
+    const rows: any[] = j?.timeseries?.result?.[0]?.trailingShortPercentOfFloat ?? [];
+    if (!rows.length) return null;
+    // Take the most recent non-null value
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const v = rows[i]?.reportedValue?.raw;
+      if (v != null && typeof v === 'number') return v;
+    }
+    return null;
+  } catch { return null; }
+}
+
+// ─── Layer F: calendar-only quoteSummary (lightweight, may succeed when full
+//              quoteSummary is blocked) ───────────────────────────────────────
+async function tryCalendarOnly(ticker: string): Promise<any | null> {
+  try {
+    const r = await fetch(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=calendarEvents%2CdefaultKeyStatistics&formatted=false`,
+      { headers: { 'User-Agent': UA, Accept: 'application/json' } }
+    );
+    if (!r.ok) return null;
+    const j: any = await r.json();
+    return j?.quoteSummary?.result?.[0] ?? null;
+  } catch { return null; }
+}
+
 // ─── Layer C: quoteSummary without crumb ──────────────────────────────────────
 async function tryNoCrumb(ticker: string): Promise<any> {
   try {
@@ -201,7 +239,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         (await tryChart(t));
     }
 
-    if (result) return res.status(200).json(result);
+    if (result) {
+      // If the primary result is partial (came from chart or v7, not quoteSummary),
+      // attempt lightweight supplementary fetches in parallel for the missing fields.
+      if (result._partial) {
+        const [siVal, calData] = await Promise.all([
+          tryShortInterest(t),
+          tryCalendarOnly(t),
+        ]);
+        // Merge short interest
+        if (siVal != null) {
+          if (!result.defaultKeyStatistics) result.defaultKeyStatistics = {};
+          result.defaultKeyStatistics.shortPercentOfFloat = siVal;
+        }
+        // Merge calendar events + key stats from lightweight quoteSummary if it worked
+        if (calData) {
+          if (calData.calendarEvents && !result.calendarEvents)
+            result.calendarEvents = calData.calendarEvents;
+          if (calData.defaultKeyStatistics) {
+            result.defaultKeyStatistics = {
+              ...calData.defaultKeyStatistics,
+              ...(result.defaultKeyStatistics ?? {}),
+            };
+          }
+        }
+      }
+      return res.status(200).json(result);
+    }
   } catch { /* fall through */ }
 
   return res.status(200).json({ _error: 'All Yahoo Finance layers failed for ' + t });

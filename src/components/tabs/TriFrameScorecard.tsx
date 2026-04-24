@@ -6,6 +6,7 @@ import { runTriFrame, loadSettings, saveSettings } from '../../lib/scoring';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { fmtCurrency, fmt } from '../../lib/utils';
 import type { TriFrameResult, SwingScore, MediumScore, LongScore, FlagSeverity } from '../../types/scorecard';
+import type { FinnhubEarnings } from '../../types';
 
 const TABLE_WATCH = 'watch_items';
 
@@ -22,6 +23,22 @@ function getNextEarningsDate(yahooData: any): string | null {
     }
   }
   return null;
+}
+
+// Estimate next earnings from Finnhub historical earnings: last period + ~91 days
+function estimateNextEarnings(history: FinnhubEarnings[] | null): string | null {
+  if (!history?.length) return null;
+  // Sort by period date descending
+  const sorted = [...history].sort((a, b) => b.period.localeCompare(a.period));
+  const lastPeriod = sorted[0]?.period; // e.g. "2025-12-31"
+  if (!lastPeriod) return null;
+  const lastDate = new Date(lastPeriod);
+  if (isNaN(lastDate.getTime())) return null;
+  // Companies typically report ~4–6 weeks after fiscal quarter end
+  // Quarter end + 91 days is a reasonable estimate for the NEXT report
+  const estimated = new Date(lastDate.getTime() + 91 * 24 * 60 * 60 * 1000);
+  if (estimated.getTime() <= Date.now()) return null; // already passed
+  return '~' + estimated.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 // Yahoo Finance sometimes returns {raw: number, fmt: string} even with formatted=false
@@ -316,6 +333,7 @@ export default function TriFrameScorecard() {
   const [yahooData, setYahooData] = useState<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [finnhubMetrics, setFinnhubMetrics] = useState<any>(null);
+  const [finnhubEarnings, setFinnhubEarnings] = useState<FinnhubEarnings[] | null>(null);
   const [addedToWatch, setAddedToWatch] = useState(false);
   const [addingWatch,  setAddingWatch]  = useState(false);
   const [headerEntry,  setHeaderEntry]  = useState('');
@@ -345,6 +363,7 @@ export default function TriFrameScorecard() {
     setError(null);
     setResult(null);
     setFinnhubMetrics(null);
+    setFinnhubEarnings(null);
 
     try {
       // TSX and other exchange suffixes — strip for Finnhub, keep for Yahoo Finance
@@ -353,12 +372,13 @@ export default function TriFrameScorecard() {
       const finnhubTicker = suffix ? t.slice(0, t.length - suffix.length) : t;
       const yahooTicker   = t;
 
-      const [quoteRes, profileRes, metricsRes, sentimentRes, yahooRes] = await Promise.allSettled([
+      const [quoteRes, profileRes, metricsRes, sentimentRes, yahooRes, earningsRes] = await Promise.allSettled([
         finnhub.quote(finnhubTicker),
         finnhub.profile(finnhubTicker),
         finnhub.metrics(finnhubTicker),
         finnhub.sentiment(finnhubTicker),
         fetchYahoo(yahooTicker),
+        finnhub.earnings(finnhubTicker),
       ]);
 
       const finnhubQuote   = quoteRes.status   === 'fulfilled' ? quoteRes.value   : null;
@@ -366,6 +386,7 @@ export default function TriFrameScorecard() {
       const metrics        = metricsRes.status === 'fulfilled' ? metricsRes.value : null;
       const sentiment      = sentimentRes.status === 'fulfilled' ? sentimentRes.value : null;
       const yahoo          = yahooRes.status    === 'fulfilled' ? yahooRes.value   : {};
+      const earningsHist   = earningsRes.status === 'fulfilled' ? earningsRes.value : null;
 
       // For exchange-suffix tickers (e.g. .TO) Finnhub may return the wrong company
       // (T → AT&T instead of Telus). Detect by checking if the exchange is non-Canadian.
@@ -419,6 +440,7 @@ export default function TriFrameScorecard() {
       setResult(res);
       setYahooData(yahoo);
       setFinnhubMetrics(metrics);
+      setFinnhubEarnings(earningsHist);
       setAddedToWatch(false);
       setHeaderEntry('');
       setHeaderExit('');
@@ -615,7 +637,7 @@ export default function TriFrameScorecard() {
                   ? fm.shortInterest / fm.sharesFloat
                   : null;
               const shortPct = yahooShortPct ?? finnhubShortPct;
-              const earningsDate = getNextEarningsDate(yahooData);
+              const earningsDate = getNextEarningsDate(yahooData) ?? estimateNextEarnings(finnhubEarnings);
               const cp = result.currentPrice;
 
               return (
@@ -641,9 +663,11 @@ export default function TriFrameScorecard() {
                     </div>
                   </div>
                   <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
-                    <div className="text-xs text-zinc-500 mb-0.5">Next Earnings</div>
+                    <div className="text-xs text-zinc-500 mb-0.5">
+                      Next Earnings{earningsDate?.startsWith('~') ? <span className="text-zinc-600 ml-1">est.</span> : null}
+                    </div>
                     <div className="text-sm font-semibold tabular-nums text-amber-300">
-                      {earningsDate ?? '—'}
+                      {earningsDate ? earningsDate.replace(/^~/, '') : '—'}
                     </div>
                   </div>
                   <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
