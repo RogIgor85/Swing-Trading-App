@@ -263,9 +263,6 @@ export default function TriFrameScorecard() {
   const [error, setError] = useState<string | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [yahooData, setYahooData] = useState<any>(null);
-  const [swingLevels,  setSwingLevels]  = useState<FrameLevels>({ entry: '', exit: '' });
-  const [mediumLevels, setMediumLevels] = useState<FrameLevels>({ entry: '', exit: '' });
-  const [longLevels,   setLongLevels]   = useState<FrameLevels>({ entry: '', exit: '' });
   const [addedToWatch, setAddedToWatch] = useState(false);
   const [addingWatch,  setAddingWatch]  = useState(false);
   const [headerEntry,  setHeaderEntry]  = useState('');
@@ -370,19 +367,6 @@ export default function TriFrameScorecard() {
       setAddedToWatch(false);
       setHeaderEntry('');
       setHeaderExit('');
-      // Auto-populate levels from scoring engine
-      setSwingLevels({
-        entry: res.swing.position?.entry  ? res.swing.position.entry.toFixed(2)  : (quote?.c ? quote.c.toFixed(2) : ''),
-        exit:  res.swing.position?.target ? res.swing.position.target.toFixed(2) : '',
-      });
-      setMediumLevels({
-        entry: quote?.c ? quote.c.toFixed(2) : '',
-        exit:  res.medium.target12m ? res.medium.target12m.toFixed(2) : '',
-      });
-      setLongLevels({
-        entry: quote?.c ? quote.c.toFixed(2) : '',
-        exit:  '',
-      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unexpected error — check console.');
     } finally {
@@ -609,126 +593,6 @@ export default function TriFrameScorecard() {
             <SwingCard  s={result.swing}  isBest={bf === 'SWING'} />
             <MediumCard m={result.medium} isBest={bf === 'MEDIUM'} />
             <LongCard   l={result.long}   isBest={bf === 'LONG'} />
-          </div>
-
-          {/* Your Price Levels */}
-          <div className="card">
-            <h3 className="text-sm font-semibold text-zinc-100 mb-4">Your Price Levels</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              {/* Swing */}
-              <div className="bg-zinc-800/40 rounded-xl border border-blue-900/50 p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <TrendingUp size={13} className="text-blue-400" />
-                  <span className="text-xs font-semibold text-blue-300 uppercase tracking-wide">Swing (3–21d)</span>
-                </div>
-                <div className="space-y-2">
-                  <div>
-                    <label className="text-xs text-zinc-500 mb-1 block">Entry Price</label>
-                    <input
-                      type="number" step="0.01"
-                      className="input-base w-full text-sm font-mono"
-                      placeholder="e.g. 145.00"
-                      value={swingLevels.entry}
-                      onChange={(e) => setSwingLevels((p) => ({ ...p, entry: e.target.value }))}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-zinc-500 mb-1 block">Exit / Target Price</label>
-                    <input
-                      type="number" step="0.01"
-                      className="input-base w-full text-sm font-mono"
-                      placeholder="e.g. 165.00"
-                      value={swingLevels.exit}
-                      onChange={(e) => setSwingLevels((p) => ({ ...p, exit: e.target.value }))}
-                    />
-                  </div>
-                  {swingLevels.entry && swingLevels.exit && (
-                    <div className={`text-xs font-semibold tabular-nums text-center py-1 rounded ${
-                      parseFloat(swingLevels.exit) > parseFloat(swingLevels.entry)
-                        ? 'text-emerald-400 bg-emerald-900/30' : 'text-red-400 bg-red-900/30'
-                    }`}>
-                      {((parseFloat(swingLevels.exit) - parseFloat(swingLevels.entry)) / parseFloat(swingLevels.entry) * 100).toFixed(1)}% potential
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Medium */}
-              <div className="bg-zinc-800/40 rounded-xl border border-purple-900/50 p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <BarChart2 size={13} className="text-purple-400" />
-                  <span className="text-xs font-semibold text-purple-300 uppercase tracking-wide">Medium (6–12m)</span>
-                </div>
-                <div className="space-y-2">
-                  <div>
-                    <label className="text-xs text-zinc-500 mb-1 block">Entry Price</label>
-                    <input
-                      type="number" step="0.01"
-                      className="input-base w-full text-sm font-mono"
-                      placeholder="e.g. 145.00"
-                      value={mediumLevels.entry}
-                      onChange={(e) => setMediumLevels((p) => ({ ...p, entry: e.target.value }))}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-zinc-500 mb-1 block">Exit / Target Price</label>
-                    <input
-                      type="number" step="0.01"
-                      className="input-base w-full text-sm font-mono"
-                      placeholder="e.g. 200.00"
-                      value={mediumLevels.exit}
-                      onChange={(e) => setMediumLevels((p) => ({ ...p, exit: e.target.value }))}
-                    />
-                  </div>
-                  {mediumLevels.entry && mediumLevels.exit && (
-                    <div className={`text-xs font-semibold tabular-nums text-center py-1 rounded ${
-                      parseFloat(mediumLevels.exit) > parseFloat(mediumLevels.entry)
-                        ? 'text-emerald-400 bg-emerald-900/30' : 'text-red-400 bg-red-900/30'
-                    }`}>
-                      {((parseFloat(mediumLevels.exit) - parseFloat(mediumLevels.entry)) / parseFloat(mediumLevels.entry) * 100).toFixed(1)}% potential
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Long */}
-              <div className="bg-zinc-800/40 rounded-xl border border-emerald-900/50 p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <Clock size={13} className="text-emerald-400" />
-                  <span className="text-xs font-semibold text-emerald-300 uppercase tracking-wide">Long (2+ yrs)</span>
-                </div>
-                <div className="space-y-2">
-                  <div>
-                    <label className="text-xs text-zinc-500 mb-1 block">Entry Price</label>
-                    <input
-                      type="number" step="0.01"
-                      className="input-base w-full text-sm font-mono"
-                      placeholder="e.g. 145.00"
-                      value={longLevels.entry}
-                      onChange={(e) => setLongLevels((p) => ({ ...p, entry: e.target.value }))}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-zinc-500 mb-1 block">Exit / Target Price</label>
-                    <input
-                      type="number" step="0.01"
-                      className="input-base w-full text-sm font-mono"
-                      placeholder="e.g. 250.00"
-                      value={longLevels.exit}
-                      onChange={(e) => setLongLevels((p) => ({ ...p, exit: e.target.value }))}
-                    />
-                  </div>
-                  {longLevels.entry && longLevels.exit && (
-                    <div className={`text-xs font-semibold tabular-nums text-center py-1 rounded ${
-                      parseFloat(longLevels.exit) > parseFloat(longLevels.entry)
-                        ? 'text-emerald-400 bg-emerald-900/30' : 'text-red-400 bg-red-900/30'
-                    }`}>
-                      {((parseFloat(longLevels.exit) - parseFloat(longLevels.entry)) / parseFloat(longLevels.entry) * 100).toFixed(1)}% potential
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
           </div>
 
           {/* Best fit banner */}
