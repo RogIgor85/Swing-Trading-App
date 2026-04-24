@@ -10,6 +10,15 @@ import type { TriFrameResult, SwingScore, MediumScore, LongScore, FlagSeverity }
 interface FrameLevels { entry: string; exit: string }
 const TABLE_WATCH = 'watch_items';
 
+// Yahoo Finance sometimes returns {raw: number, fmt: string} even with formatted=false
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function yNum(v: any): number | null {
+  if (v == null) return null;
+  if (typeof v === 'number') return v;
+  if (typeof v === 'object' && typeof v.raw === 'number') return v.raw;
+  return null;
+}
+
 // ─── Verdict styling ──────────────────────────────────────────────────────────
 const SWING_VERDICT_STYLE: Record<string, string> = {
   'GO':          'bg-emerald-900/50 text-emerald-300 border border-emerald-600',
@@ -519,51 +528,47 @@ export default function TriFrameScorecard() {
             </div>
 
             {/* Market data row: MAs + short interest */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {[
-                {
-                  label: '50D MA',
-                  value: yahooData?.summaryDetail?.fiftyDayAverage
-                    ? fmtCurrency(yahooData.summaryDetail.fiftyDayAverage)
-                    : '—',
-                  color: yahooData?.summaryDetail?.fiftyDayAverage && result.currentPrice
-                    ? result.currentPrice > yahooData.summaryDetail.fiftyDayAverage
-                      ? 'text-emerald-400' : 'text-red-400'
-                    : 'text-zinc-300',
-                },
-                {
-                  label: '200D MA',
-                  value: yahooData?.summaryDetail?.twoHundredDayAverage
-                    ? fmtCurrency(yahooData.summaryDetail.twoHundredDayAverage)
-                    : '—',
-                  color: yahooData?.summaryDetail?.twoHundredDayAverage && result.currentPrice
-                    ? result.currentPrice > yahooData.summaryDetail.twoHundredDayAverage
-                      ? 'text-emerald-400' : 'text-red-400'
-                    : 'text-zinc-300',
-                },
-                {
-                  label: 'Short Interest',
-                  value: yahooData?.defaultKeyStatistics?.shortPercentOfFloat != null
-                    ? `${(yahooData.defaultKeyStatistics.shortPercentOfFloat * 100).toFixed(1)}%`
-                    : yahooData?.summaryDetail?.shortPercentOfFloat != null
-                    ? `${(yahooData.summaryDetail.shortPercentOfFloat * 100).toFixed(1)}%`
-                    : '—',
-                  color: 'text-zinc-300',
-                },
-                {
-                  label: '52W Range',
-                  value: yahooData?.summaryDetail?.fiftyTwoWeekLow && yahooData?.summaryDetail?.fiftyTwoWeekHigh
-                    ? `${fmtCurrency(yahooData.summaryDetail.fiftyTwoWeekLow)} – ${fmtCurrency(yahooData.summaryDetail.fiftyTwoWeekHigh)}`
-                    : '—',
-                  color: 'text-zinc-300',
-                },
-              ].map(({ label, value, color }) => (
-                <div key={label} className="bg-zinc-800/50 rounded-lg px-3 py-2">
-                  <div className="text-xs text-zinc-500 mb-0.5">{label}</div>
-                  <div className={`text-sm font-semibold tabular-nums ${color}`}>{value}</div>
+            {(() => {
+              const sd  = yahooData?.summaryDetail;
+              const ks  = yahooData?.defaultKeyStatistics;
+              const ma50  = yNum(sd?.fiftyDayAverage);
+              const ma200 = yNum(sd?.twoHundredDayAverage);
+              const wk52Hi = yNum(sd?.fiftyTwoWeekHigh);
+              const wk52Lo = yNum(sd?.fiftyTwoWeekLow);
+              const shortPct = yNum(ks?.shortPercentOfFloat) ?? yNum(sd?.shortPercentOfFloat);
+              const cp = result.currentPrice;
+
+              return (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
+                    <div className="text-xs text-zinc-500 mb-0.5">50D MA</div>
+                    <div className={`text-sm font-semibold tabular-nums ${ma50 ? (cp > ma50 ? 'text-emerald-400' : 'text-red-400') : 'text-zinc-300'}`}>
+                      {ma50 ? fmtCurrency(ma50) : '—'}
+                    </div>
+                    {ma50 && <div className="text-xs text-zinc-600">{cp > ma50 ? '▲ above' : '▼ below'}</div>}
+                  </div>
+                  <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
+                    <div className="text-xs text-zinc-500 mb-0.5">200D MA</div>
+                    <div className={`text-sm font-semibold tabular-nums ${ma200 ? (cp > ma200 ? 'text-emerald-400' : 'text-red-400') : 'text-zinc-300'}`}>
+                      {ma200 ? fmtCurrency(ma200) : '—'}
+                    </div>
+                    {ma200 && <div className="text-xs text-zinc-600">{cp > ma200 ? '▲ above' : '▼ below'}</div>}
+                  </div>
+                  <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
+                    <div className="text-xs text-zinc-500 mb-0.5">Short Interest</div>
+                    <div className="text-sm font-semibold tabular-nums text-zinc-300">
+                      {shortPct != null ? `${(shortPct * 100).toFixed(1)}%` : '—'}
+                    </div>
+                  </div>
+                  <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
+                    <div className="text-xs text-zinc-500 mb-0.5">52W Range</div>
+                    <div className="text-xs font-semibold tabular-nums text-zinc-300">
+                      {wk52Lo && wk52Hi ? `${fmtCurrency(wk52Lo)} – ${fmtCurrency(wk52Hi)}` : '—'}
+                    </div>
+                  </div>
                 </div>
-              ))}
-            </div>
+              );
+            })()}
           </div>
 
           {/* 3 cards */}

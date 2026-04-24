@@ -11,8 +11,9 @@ function isTSX(ticker: string) {
 // ─── Layer A: v8 chart API — most reliable across all regions/exchanges ────────
 async function tryChart(ticker: string): Promise<any> {
   try {
+    // Use 6mo range so meta includes fiftyDayAverage + twoHundredDayAverage
     const r = await fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=5d&includePrePost=false`,
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=6mo&includePrePost=false`,
       { headers: { 'User-Agent': UA, Accept: 'application/json' } }
     );
     if (!r.ok) return null;
