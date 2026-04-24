@@ -8,29 +8,45 @@ function isTSX(ticker: string) {
   return TSX_SUFFIXES.some((s) => ticker.toUpperCase().endsWith(s));
 }
 
-// ─── Layer A: v8 chart API — most reliable across all regions/exchanges ────────
+// Helper: simple moving average of last N values
+function sma(closes: number[], n: number): number | null {
+  if (closes.length < n) return null;
+  const slice = closes.slice(-n);
+  return slice.reduce((a, b) => a + b, 0) / n;
+}
+
+// ─── Layer A: v8 chart API — 1y range so we can compute 50D/200D MA ───────────
 async function tryChart(ticker: string): Promise<any> {
   try {
-    // Use 6mo range so meta includes fiftyDayAverage + twoHundredDayAverage
+    // 1y of daily data gives us enough closes to compute 50D and 200D MA
     const r = await fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=6mo&includePrePost=false`,
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1y&includePrePost=false`,
       { headers: { 'User-Agent': UA, Accept: 'application/json' } }
     );
     if (!r.ok) return null;
     const j: any = await r.json();
-    const meta = j?.chart?.result?.[0]?.meta;
+    const result = j?.chart?.result?.[0];
+    const meta   = result?.meta;
     if (!meta?.regularMarketPrice) return null;
+
+    // Extract closing prices from chart data
+    const closes: number[] = (result?.indicators?.quote?.[0]?.close ?? [])
+      .filter((c: any) => c != null && typeof c === 'number');
 
     const prevClose = meta.previousClose ?? meta.chartPreviousClose ?? null;
     const price     = meta.regularMarketPrice;
     const change    = prevClose != null ? price - prevClose : null;
     const changePct = prevClose != null && prevClose !== 0 ? (price - prevClose) / prevClose : null;
 
+    // Compute MAs from actual closes; fall back to meta fields if not enough data
+    const ma50  = sma(closes, 50)  ?? meta.fiftyDayAverage     ?? null;
+    const ma200 = sma(closes, 200) ?? meta.twoHundredDayAverage ?? null;
+
     return {
       price: {
         regularMarketPrice:         price,
         regularMarketChange:        change,
-        regularMarketChangePercent: changePct,   // decimal e.g. 0.015 for 1.5%
+        regularMarketChangePercent: changePct,
         regularMarketPreviousClose: prevClose,
         regularMarketOpen:          meta.regularMarketOpen    ?? null,
         regularMarketDayHigh:       meta.regularMarketDayHigh ?? null,
@@ -47,8 +63,8 @@ async function tryChart(ticker: string): Promise<any> {
         marketCap:              null,
         fiftyTwoWeekHigh:       meta.fiftyTwoWeekHigh    ?? null,
         fiftyTwoWeekLow:        meta.fiftyTwoWeekLow     ?? null,
-        fiftyDayAverage:        meta.fiftyDayAverage     ?? null,
-        twoHundredDayAverage:   meta.twoHundredDayAverage ?? null,
+        fiftyDayAverage:        ma50,
+        twoHundredDayAverage:   ma200,
         averageVolume:          meta.averageVolume        ?? null,
         beta:                   null,
         volume:                 meta.regularMarketVolume  ?? null,
