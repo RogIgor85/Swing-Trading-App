@@ -112,8 +112,8 @@ export default function App() {
         </div>
       </header>
 
-      {/* Content */}
-      <main className="max-w-7xl mx-auto px-4 py-6">
+      {/* Content — portfolio gets a wider container to avoid table scroll */}
+      <main className={`mx-auto px-4 py-6 ${activeTab === 'portfolio' ? 'max-w-[1600px]' : 'max-w-7xl'}`}>
         {activeTab === 'scorecard' && <TriFrameScorecard />}
         {activeTab === 'watchlist' && <WatchList />}
         {activeTab === 'technical' && <ChartAnalysis />}

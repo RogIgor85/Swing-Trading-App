@@ -92,7 +92,7 @@ export default function PortfolioRisk() {
   const [sellForm, setSellForm] = useState({ exitPrice: '', qtySold: '', dateSold: new Date().toISOString().split('T')[0] });
   const [sellLoading, setSellLoading] = useState(false);
 
-  type SortKey = 'ticker' | 'account' | 'currency' | 'shares' | 'avg_cost' | 'currentPrice' | 'changePct' | 'marketValue' | 'pnl' | 'allocationPct' | 'sector';
+  type SortKey = 'ticker' | 'account' | 'currency' | 'shares' | 'avg_cost' | 'currentPrice' | 'changePct' | 'costBasis' | 'marketValue' | 'pnl' | 'allocationPct' | 'sector';
   const [sortKey, setSortKey]   = useState<SortKey | null>(null);
   const [sortDir, setSortDir]   = useState<'asc' | 'desc'>('asc');
 
@@ -593,6 +593,7 @@ export default function PortfolioRisk() {
                       { label: 'Avg Cost',     key: 'avg_cost'      },
                       { label: 'Current',      key: 'currentPrice'  },
                       { label: 'Day %',        key: 'changePct'     },
+                      { label: 'Book Value',   key: 'costBasis'     },
                       { label: 'Mkt Value',    key: 'marketValue'   },
                       { label: 'P&L (native)', key: 'pnl'           },
                       { label: 'Alloc %',      key: 'allocationPct' },
@@ -680,6 +681,12 @@ export default function PortfolioRisk() {
 
                       <td className={`td tabular-nums text-xs font-medium ${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-400'}`}>
                         {h.priceSource === 'manual' ? <span className="text-zinc-600">—</span> : fmtPct(h.changePct)}
+                      </td>
+
+                      {/* Book Value = cost basis, native currency */}
+                      <td className="td tabular-nums text-sm">
+                        {fmtCurrency(h.costBasis)}
+                        <span className="text-xs text-zinc-600 ml-1">{h.currency}</span>
                       </td>
 
                       {/* Market value — native currency */}
