@@ -268,6 +268,8 @@ export default function TriFrameScorecard() {
   const [longLevels,   setLongLevels]   = useState<FrameLevels>({ entry: '', exit: '' });
   const [addedToWatch, setAddedToWatch] = useState(false);
   const [addingWatch,  setAddingWatch]  = useState(false);
+  const [headerEntry,  setHeaderEntry]  = useState('');
+  const [headerExit,   setHeaderExit]   = useState('');
 
   // Account size
   const [accountSize, setAccountSize] = useState<number>(() => loadSettings().accountSize ?? 0);
@@ -366,6 +368,8 @@ export default function TriFrameScorecard() {
       setResult(res);
       setYahooData(yahoo);
       setAddedToWatch(false);
+      setHeaderEntry('');
+      setHeaderExit('');
       // Auto-populate levels from scoring engine
       setSwingLevels({
         entry: res.swing.position?.entry  ? res.swing.position.entry.toFixed(2)  : (quote?.c ? quote.c.toFixed(2) : ''),
@@ -391,15 +395,15 @@ export default function TriFrameScorecard() {
     setAddingWatch(true);
     try {
       await storage.insert(TABLE_WATCH, {
-        id:            newId(),
-        ticker:        result.ticker,
-        conviction:    'MEDIUM',
-        notes:         '',
-        watch_price:   result.currentPrice,
-        watch_date:    new Date().toISOString().split('T')[0],
-        analyst_target: null,
-        target_entry:  swingLevels.entry ? parseFloat(swingLevels.entry) : null,
-        created_at:    nowIso(),
+        id:             newId(),
+        ticker:         result.ticker,
+        conviction:     'MEDIUM',
+        notes:          headerExit ? `Target exit: $${headerExit}` : '',
+        watch_price:    result.currentPrice,
+        watch_date:     new Date().toISOString().split('T')[0],
+        analyst_target: headerExit  ? parseFloat(headerExit)  : null,
+        target_entry:   headerEntry ? parseFloat(headerEntry) : null,
+        created_at:     nowIso(),
       });
       setAddedToWatch(true);
     } catch { /* ignore */ } finally {
@@ -501,7 +505,8 @@ export default function TriFrameScorecard() {
               <span className="text-xs text-zinc-500">{result.exchange}</span>
               <span className="text-xs text-zinc-600">·</span>
               <span className="text-xs text-zinc-500">{result.industry}</span>
-              <div className="ml-auto flex items-center gap-3">
+              <div className="ml-auto flex items-center gap-3 flex-wrap justify-end">
+                {/* Price */}
                 <div className="text-right">
                   <div className="text-2xl font-bold tabular-nums">{fmtCurrency(result.currentPrice)}</div>
                   <div className="text-xs text-zinc-500">
@@ -512,6 +517,34 @@ export default function TriFrameScorecard() {
                       : `$${(result.marketCap / 1e6).toFixed(0)}M`}
                   </div>
                 </div>
+
+                {/* Entry / Exit inputs */}
+                <div className="flex items-center gap-2">
+                  <div>
+                    <label className="text-[10px] text-zinc-500 block mb-0.5">Entry $</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="—"
+                      value={headerEntry}
+                      onChange={(e) => setHeaderEntry(e.target.value)}
+                      className="w-24 bg-zinc-800 border border-zinc-700 focus:border-blue-500 rounded px-2 py-1.5 text-sm font-mono text-zinc-100 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-500 block mb-0.5">Exit / Target $</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="—"
+                      value={headerExit}
+                      onChange={(e) => setHeaderExit(e.target.value)}
+                      className="w-24 bg-zinc-800 border border-zinc-700 focus:border-blue-500 rounded px-2 py-1.5 text-sm font-mono text-zinc-100 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Watch List button */}
                 <button
                   onClick={handleAddToWatchlist}
                   disabled={addingWatch || addedToWatch}
