@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle, ExternalLink } from 'lucide-react';
+import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle, ExternalLink, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
@@ -91,6 +91,19 @@ export default function PortfolioRisk() {
   const [sellId, setSellId] = useState<string | null>(null);
   const [sellForm, setSellForm] = useState({ exitPrice: '', qtySold: '', dateSold: new Date().toISOString().split('T')[0] });
   const [sellLoading, setSellLoading] = useState(false);
+
+  type SortKey = 'ticker' | 'account' | 'currency' | 'shares' | 'avg_cost' | 'currentPrice' | 'changePct' | 'marketValue' | 'pnl' | 'allocationPct' | 'sector';
+  const [sortKey, setSortKey]   = useState<SortKey | null>(null);
+  const [sortDir, setSortDir]   = useState<'asc' | 'desc'>('asc');
+
+  function handleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  }
 
   const load = useCallback(async () => {
     const data = await storage.getAll<Holding>(TABLE);
@@ -354,7 +367,22 @@ export default function PortfolioRisk() {
   }));
 
   // Filter by account
-  const filtered = filterAccount === 'ALL' ? withAlloc : withAlloc.filter((h) => h.account === filterAccount);
+  const baseFiltered = filterAccount === 'ALL' ? withAlloc : withAlloc.filter((h) => h.account === filterAccount);
+
+  // Sort
+  const filtered = sortKey
+    ? [...baseFiltered].sort((a, b) => {
+        const aVal = a[sortKey as keyof typeof a];
+        const bVal = b[sortKey as keyof typeof b];
+        let cmp = 0;
+        if (typeof aVal === 'string' && typeof bVal === 'string') {
+          cmp = aVal.localeCompare(bVal);
+        } else {
+          cmp = (aVal as number) - (bVal as number);
+        }
+        return sortDir === 'asc' ? cmp : -cmp;
+      })
+    : baseFiltered;
 
   // Summary stats scoped to the filtered (account) view — always in CAD
   const summaryValueCAD = filtered.reduce((s, h) => s + h.cadMarketValue, 0);
@@ -557,17 +585,35 @@ export default function PortfolioRisk() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-zinc-800">
-                    <th className="th">Ticker</th>
-                    <th className="th">Account</th>
-                    <th className="th">Cur</th>
-                    <th className="th">Shares</th>
-                    <th className="th">Avg Cost</th>
-                    <th className="th">Current</th>
-                    <th className="th">Day %</th>
-                    <th className="th">Mkt Value</th>
-                    <th className="th">P&L (native)</th>
-                    <th className="th">Alloc %</th>
-                    <th className="th">Sector</th>
+                    {([
+                      { label: 'Ticker',       key: 'ticker'        },
+                      { label: 'Account',      key: 'account'       },
+                      { label: 'Cur',          key: 'currency'      },
+                      { label: 'Shares',       key: 'shares'        },
+                      { label: 'Avg Cost',     key: 'avg_cost'      },
+                      { label: 'Current',      key: 'currentPrice'  },
+                      { label: 'Day %',        key: 'changePct'     },
+                      { label: 'Mkt Value',    key: 'marketValue'   },
+                      { label: 'P&L (native)', key: 'pnl'           },
+                      { label: 'Alloc %',      key: 'allocationPct' },
+                      { label: 'Sector',       key: 'sector'        },
+                    ] as { label: string; key: SortKey }[]).map(({ label, key }) => (
+                      <th key={key} className="th">
+                        <button
+                          onClick={() => handleSort(key)}
+                          className="flex items-center gap-1 hover:text-zinc-100 transition-colors group whitespace-nowrap"
+                        >
+                          {label}
+                          <span className="text-zinc-600 group-hover:text-zinc-400 transition-colors">
+                            {sortKey === key
+                              ? sortDir === 'asc'
+                                ? <ChevronUp size={11} className="text-blue-400" />
+                                : <ChevronDown size={11} className="text-blue-400" />
+                              : <ChevronsUpDown size={11} />}
+                          </span>
+                        </button>
+                      </th>
+                    ))}
                     <th className="th" />
                   </tr>
                 </thead>
