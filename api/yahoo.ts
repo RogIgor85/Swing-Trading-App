@@ -84,6 +84,7 @@ async function tryV7Quote(ticker: string): Promise<any> {
       'longName','shortName','exchangeName','fullExchangeName','currency','marketCap',
       'fiftyTwoWeekHigh','fiftyTwoWeekLow','fiftyDayAverage','twoHundredDayAverage',
       'averageDailyVolume3Month','trailingPE','forwardPE','beta',
+      'shortPercentOfFloat','shortRatio',
     ].join(',');
     const r = await fetch(
       `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(ticker)}&fields=${fields}`,
@@ -122,6 +123,10 @@ async function tryV7Quote(ticker: string): Promise<any> {
         volume:               q.regularMarketVolume     ?? null,
         trailingPE:           q.trailingPE              ?? null,
         forwardPE:            q.forwardPE               ?? null,
+      },
+      defaultKeyStatistics: {
+        shortPercentOfFloat:  q.shortPercentOfFloat ?? null,
+        shortRatio:           q.shortRatio          ?? null,
       },
       _partial: true,
     };

@@ -35,17 +35,49 @@ const FLAG_SEVERITY: Record<FlagSeverity, string> = {
   MEDIUM: 'text-amber-400',
   HIGH:   'text-red-400',
 };
-const FLAG_DEFINITIONS: Record<string, string> = {
-  'Beta':
-    'Measures volatility vs the S&P 500. Beta 1.0 = moves with the market. >1.5 = amplified swings in both directions — bigger gains but bigger drawdowns. Factor into your stop placement.',
-  'Short Interest':
-    'Percentage of the float sold short. >10% is elevated; >20% is HIGH. High short interest can trigger a short squeeze (rapid rally) but also signals bearish institutional conviction.',
-  'Days to Cover':
-    'How many days of average volume it would take all short sellers to buy back their shares. >5 days = squeeze risk. >10 days = significant squeeze potential if positive catalyst hits.',
-  'Avg Volume':
-    'Average daily shares traded. LOW volume (<500K) means wide bid/ask spreads, harder to exit quickly, and easier for large orders to move price against you.',
-  'Next Earnings':
-    'Days until the next earnings report. Earnings can cause 5–20%+ gaps overnight. Holding through earnings is a binary event — consider reducing size or closing before the date.',
+const FLAG_DEFINITIONS: Record<string, { summary: string; bullets: string[] }> = {
+  'Beta': {
+    summary: 'How much the stock moves relative to the S&P 500.',
+    bullets: [
+      'Beta = 1.0 → moves exactly with the market. S&P down 5% = stock down ~5%',
+      'Beta > 1.0 → more volatile. Beta 1.5 = S&P down 5% → stock down ~7.5%',
+      'Beta < 1.0 → less volatile. Beta 0.5 = S&P down 5% → stock down ~2.5%',
+      'Beta < 0 → moves opposite to the market (rare — gold miners sometimes)',
+    ],
+  },
+  'Short Interest': {
+    summary: '% of the float currently sold short by traders betting the stock falls.',
+    bullets: [
+      '<5% — normal, minimal bearish pressure',
+      '5–10% — elevated, worth monitoring',
+      '>10% — HIGH short interest; squeeze risk if positive news hits',
+      '>20% — very crowded short; explosive squeeze potential but strong bearish conviction',
+    ],
+  },
+  'Days to Cover': {
+    summary: 'Days needed for all short sellers to buy back shares at current volume.',
+    bullets: [
+      '<3 days — shorts can exit quickly, low squeeze risk',
+      '5–10 days — meaningful squeeze potential',
+      '>10 days — significant squeeze risk; shorts are trapped if catalyst hits',
+    ],
+  },
+  'Avg Volume': {
+    summary: 'Average daily shares traded — measures how easy it is to enter and exit.',
+    bullets: [
+      '>2M — highly liquid, tight spreads, easy to scale in/out',
+      '500K–2M — moderate liquidity, manageable for most position sizes',
+      '<500K — thin liquidity; wide spreads, harder to exit quickly in a downturn',
+    ],
+  },
+  'Next Earnings': {
+    summary: 'Days until the next earnings report — a binary overnight event.',
+    bullets: [
+      '>21 days — low near-term risk, safe to hold swing positions',
+      '7–21 days — consider reducing position size heading into the date',
+      '<7 days — HIGH risk; stocks can gap 5–20%+ after earnings; consider closing',
+    ],
+  },
 };
 
 const TIER_BADGE: Record<string, string> = {
@@ -631,28 +663,34 @@ export default function TriFrameScorecard() {
               <h3 className="text-sm font-semibold text-zinc-100 mb-3 flex items-center gap-2">
                 <AlertTriangle size={14} className="text-amber-400" /> Risk Flags
               </h3>
-              <div className="flex flex-wrap gap-3">
-                {result.riskFlags.map((f, i) => {
-                  const def = FLAG_DEFINITIONS[f.label];
-                  return (
-                    <div key={i} className="relative group bg-zinc-800 rounded-lg px-3 py-2 flex flex-col gap-0.5 cursor-default">
-                      <span className="text-xs text-zinc-500 flex items-center gap-1">
-                        {f.label}
-                        {def && <span className="text-zinc-600 text-[10px]">(?)</span>}
-                      </span>
+              <div className="flex flex-col lg:flex-row gap-6">
+                {/* Flag chips */}
+                <div className="flex flex-wrap gap-3 content-start">
+                  {result.riskFlags.map((f, i) => (
+                    <div key={i} className="bg-zinc-800 rounded-lg px-3 py-2 flex flex-col gap-0.5">
+                      <span className="text-xs text-zinc-500">{f.label}</span>
                       <span className={`text-sm font-semibold tabular-nums ${FLAG_SEVERITY[f.severity]}`}>{f.value}</span>
-                      {/* Tooltip */}
-                      {def && (
-                        <div className="absolute bottom-full left-0 mb-2 w-72 z-20 hidden group-hover:block">
-                          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-3 shadow-xl">
-                            <div className="text-xs font-semibold text-zinc-200 mb-1">{f.label}</div>
-                            <p className="text-xs text-zinc-400 leading-relaxed">{def}</p>
-                          </div>
-                        </div>
-                      )}
                     </div>
-                  );
-                })}
+                  ))}
+                </div>
+
+                {/* Definitions panel */}
+                <div className="lg:border-l lg:border-zinc-800 lg:pl-6 space-y-4 flex-1 min-w-0">
+                  {Object.entries(FLAG_DEFINITIONS).map(([label, { summary, bullets }]) => (
+                    <div key={label}>
+                      <div className="text-xs font-semibold text-zinc-200 mb-0.5">{label}</div>
+                      <p className="text-xs text-zinc-500 mb-1">{summary}</p>
+                      <ul className="space-y-0.5">
+                        {bullets.map((b, i) => (
+                          <li key={i} className="text-xs text-zinc-500 flex gap-1.5">
+                            <span className="text-zinc-600 flex-shrink-0">→</span>
+                            <span>{b}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           )}
