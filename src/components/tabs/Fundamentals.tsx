@@ -3,6 +3,7 @@ import { Search, Save, Trash2, RefreshCw, ExternalLink } from 'lucide-react';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
+import type { YahooData } from '../../lib/yahoo';
 import { toYahooTicker } from '../FundamentalsDrawer';
 import { fmt, fmtCurrency, fmtPct } from '../../lib/utils';
 import type {
@@ -12,6 +13,11 @@ import type {
   FinnhubEarnings,
   FinnhubSentiment,
 } from '../../types';
+
+const TSX_SUFFIXES = ['.TO', '.V', '.TSX', '.CN', '.NEO', '.VN'];
+function isCanadian(ticker: string) {
+  return TSX_SUFFIXES.some((s) => ticker.toUpperCase().endsWith(s.toUpperCase()));
+}
 
 const TABLE = 'fundamentals';
 
@@ -37,6 +43,7 @@ export default function Fundamentals() {
   const [saving, setSaving] = useState(false);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const [livePrice, setLivePrice] = useState<{ price: number; change: number; changePct: number; volume: number } | null>(null);
+  const [yahooData, setYahooData] = useState<YahooData | null>(null);
 
   const load = useCallback(async () => {
     const d = await storage.getAll<FundamentalNote>(TABLE);
@@ -51,8 +58,11 @@ export default function Fundamentals() {
     setActiveTicker(t);
     setData({ loading: true });
     setLivePrice(null);
-    // Fetch live price from Yahoo
-    fetchYahoo(toYahooTicker(t, 'USD')).then((y) => {
+    setYahooData(null);
+    // Fetch live price from Yahoo (detect CAD tickers)
+    const currency = isCanadian(t) ? 'CAD' : 'USD';
+    fetchYahoo(toYahooTicker(t, currency)).then((y) => {
+      setYahooData(y);
       const price = y.price?.regularMarketPrice;
       const change = y.price?.regularMarketChange;
       const changePct = y.price?.regularMarketChangePercent;
@@ -146,6 +156,21 @@ export default function Fundamentals() {
   const m = data.metrics?.metric;
   const profile = data.profile;
 
+  // For Canadian stocks Finnhub has no data — build a synthetic profile from Yahoo
+  const yahooProfile = !data.loading && !profile && yahooData?.price
+    ? {
+        name:       yahooData.price.longName ?? yahooData.price.shortName ?? activeTicker,
+        exchange:   yahooData.price.fullExchangeName ?? yahooData.price.exchangeName ?? 'TSX',
+        currency:   yahooData.price.currency ?? 'CAD',
+        marketCap:  yahooData.price.marketCap ?? yahooData.summaryDetail?.marketCap ?? null,
+        week52High: yahooData.summaryDetail?.fiftyTwoWeekHigh ?? null,
+        week52Low:  yahooData.summaryDetail?.fiftyTwoWeekLow  ?? null,
+        ma50:       yahooData.summaryDetail?.fiftyDayAverage  ?? null,
+        ma200:      yahooData.summaryDetail?.twoHundredDayAverage ?? null,
+        avgVol:     yahooData.summaryDetail?.averageVolume    ?? null,
+      }
+    : null;
+
   return (
     <div className="space-y-6">
       {/* Search */}
@@ -193,6 +218,120 @@ export default function Fundamentals() {
 
       {data.error && (
         <div className="card border-red-900 bg-red-900/10 text-red-400 text-sm">{data.error}</div>
+      )}
+
+      {/* Canadian stock view — Finnhub doesn't cover TSX, use Yahoo data */}
+      {yahooProfile && (
+        <div className="card">
+          <div className="flex items-start justify-between mb-4">
+            <div>
+              <h2 className="text-lg font-bold text-zinc-100">{yahooProfile.name}</h2>
+              <div className="flex gap-2 text-xs text-zinc-500 mt-0.5">
+                <span className="font-mono text-blue-400">{activeTicker}</span>
+                <span>·</span>
+                <span>{yahooProfile.exchange}</span>
+                <span>·</span>
+                <span className="text-amber-400">{yahooProfile.currency}</span>
+              </div>
+              <p className="text-xs text-zinc-600 mt-1">
+                Detailed fundamentals (earnings, ratios) are US-only via Finnhub. Price data via Yahoo Finance.
+              </p>
+            </div>
+            <button onClick={() => fetchData(activeTicker)} className="btn-ghost flex items-center gap-1.5 text-xs">
+              <RefreshCw size={12} /> Refresh
+            </button>
+          </div>
+
+          {livePrice && (
+            <div className="flex items-center gap-4 mb-4 p-3 bg-zinc-800/40 rounded-lg">
+              <div>
+                <div className="text-xs text-zinc-500 mb-0.5">Current Price</div>
+                <div className="text-2xl font-bold tabular-nums text-zinc-100">
+                  {yahooProfile.currency === 'CAD' ? 'CA$' : '$'}{livePrice.price.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-zinc-500 mb-0.5">Day Change</div>
+                <div className={`text-sm font-semibold tabular-nums ${livePrice.changePct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {livePrice.changePct >= 0 ? '+' : ''}{livePrice.change.toFixed(2)} ({livePrice.changePct >= 0 ? '+' : ''}{livePrice.changePct.toFixed(2)}%)
+                </div>
+              </div>
+              {livePrice.volume > 0 && (
+                <div>
+                  <div className="text-xs text-zinc-500 mb-0.5">Volume</div>
+                  <div className="text-sm font-semibold text-zinc-300">
+                    {livePrice.volume >= 1_000_000
+                      ? `${(livePrice.volume / 1_000_000).toFixed(2)}M`
+                      : livePrice.volume >= 1_000
+                      ? `${(livePrice.volume / 1_000).toFixed(0)}K`
+                      : livePrice.volume.toLocaleString()}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {[
+              { label: 'Market Cap',   value: yahooProfile.marketCap ? `${yahooProfile.currency === 'CAD' ? 'CA$' : '$'}${(yahooProfile.marketCap / 1e9).toFixed(2)}B` : '—' },
+              { label: '52W High',     value: yahooProfile.week52High ? fmtCurrency(yahooProfile.week52High) : '—' },
+              { label: '52W Low',      value: yahooProfile.week52Low  ? fmtCurrency(yahooProfile.week52Low)  : '—' },
+              { label: '50D MA',       value: yahooProfile.ma50       ? fmtCurrency(yahooProfile.ma50)       : '—' },
+              { label: '200D MA',      value: yahooProfile.ma200      ? fmtCurrency(yahooProfile.ma200)      : '—' },
+              { label: 'Avg Volume',   value: yahooProfile.avgVol     ? (yahooProfile.avgVol >= 1e6 ? `${(yahooProfile.avgVol/1e6).toFixed(1)}M` : `${(yahooProfile.avgVol/1e3).toFixed(0)}K`) : '—' },
+            ].map(({ label, value }) => (
+              <div key={label} className="bg-zinc-800/40 rounded-lg p-3">
+                <div className="text-xs text-zinc-500 mb-1">{label}</div>
+                <div className="text-sm font-semibold text-zinc-100">{value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {yahooProfile && (
+        <div className="card">
+          <h2 className="text-base font-semibold text-zinc-100 mb-4">
+            Research Notes — <span className="text-blue-400">{activeTicker}</span>
+            {activeNoteId && <span className="ml-2 text-xs text-zinc-600">(saved)</span>}
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div>
+              <label className="label text-emerald-400">Bull Case</label>
+              <textarea
+                className="input-base resize-none border-emerald-900/50 focus:border-emerald-600"
+                rows={5}
+                placeholder="Key bull case arguments..."
+                value={bullCase}
+                onChange={(e) => setBullCase(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label text-red-400">Bear Case</label>
+              <textarea
+                className="input-base resize-none border-red-900/50 focus:border-red-700"
+                rows={5}
+                placeholder="Key bear case arguments..."
+                value={bearCase}
+                onChange={(e) => setBearCase(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="mb-4">
+            <label className="label">Additional Notes</label>
+            <textarea
+              className="input-base resize-none"
+              rows={4}
+              placeholder="Management guidance, catalysts, key metrics to watch..."
+              value={noteText}
+              onChange={(e) => setNoteText(e.target.value)}
+            />
+          </div>
+          <button onClick={handleSave} className="btn-primary flex items-center gap-2" disabled={saving}>
+            <Save size={14} />
+            {saving ? 'Saving...' : 'Save Notes'}
+          </button>
+        </div>
       )}
 
       {profile && (
