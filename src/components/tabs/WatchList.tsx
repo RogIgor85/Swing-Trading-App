@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, Trash2, RefreshCw, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { Plus, Trash2, RefreshCw, TrendingUp, TrendingDown, Minus, ShoppingCart, X, Check } from 'lucide-react';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
@@ -7,6 +7,8 @@ import FundamentalsDrawer from '../FundamentalsDrawer';
 import { toYahooTicker } from '../FundamentalsDrawer';
 import { changeColor, fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import type { WatchItem, FinnhubQuote, FinnhubSentiment, Conviction } from '../../types';
+
+const HOLDINGS_TABLE = 'holdings';
 
 const TABLE = 'watch_items';
 
@@ -45,6 +47,14 @@ export default function WatchList() {
   const [fetchingPrice, setFetchingPrice] = useState(false);
   const [sortConviction, setSortConviction] = useState(true);
   const [drawer, setDrawer] = useState<{ ticker: string; currency: string } | null>(null);
+
+  // Buy inline form
+  const [buyId, setBuyId]         = useState<string | null>(null);
+  const [buyShares, setBuyShares] = useState('');
+  const [buyPrice, setBuyPrice]   = useState('');
+  const [buyAccount, setBuyAccount] = useState('TFSA');
+  const [buyCurrency, setBuyCurrency] = useState('USD');
+  const [buyLoading, setBuyLoading] = useState(false);
 
   const load = useCallback(async () => {
     const data = await storage.getAll<WatchItem>(TABLE);
@@ -161,6 +171,59 @@ export default function WatchList() {
       await load();
     } catch { /* ignore */ } finally {
       setAdding(false);
+    }
+  }
+
+  function openBuyForm(item: WatchItem) {
+    setBuyId(item.id);
+    setBuyShares('');
+    const cp = liveData[item.ticker]?.quote?.c;
+    setBuyPrice(cp ? cp.toFixed(2) : item.target_entry ? item.target_entry.toFixed(2) : '');
+    const isCAD = item.ticker.includes('.TO') || item.ticker.includes('.V') || item.ticker.includes('.CN');
+    setBuyCurrency(isCAD ? 'CAD' : 'USD');
+    setBuyAccount('TFSA');
+  }
+
+  async function handleBuy(item: WatchItem) {
+    const shares = parseFloat(buyShares);
+    const cost   = parseFloat(buyPrice);
+    if (!shares || !cost || shares <= 0 || cost <= 0) return;
+    setBuyLoading(true);
+    try {
+      // Check for existing holding to merge
+      const existing = (await storage.getAll<{
+        id: string; ticker: string; account: string; currency: string; shares: number; avg_cost: number;
+      }>(HOLDINGS_TABLE)).find(
+        (h) => h.ticker === item.ticker && h.account === buyAccount && h.currency === buyCurrency
+      );
+
+      if (existing) {
+        const totalShares = existing.shares + shares;
+        const newAvgCost  = (existing.shares * existing.avg_cost + shares * cost) / totalShares;
+        await storage.update(HOLDINGS_TABLE, existing.id, {
+          shares: totalShares,
+          avg_cost: parseFloat(newAvgCost.toFixed(6)),
+        });
+      } else {
+        await storage.insert(HOLDINGS_TABLE, {
+          id: newId(),
+          ticker: item.ticker,
+          shares,
+          avg_cost: cost,
+          account: buyAccount,
+          currency: buyCurrency,
+          added_date: new Date().toISOString().split('T')[0],
+          created_at: nowIso(),
+        });
+      }
+
+      // Remove from watchlist
+      await storage.remove(TABLE, item.id);
+      setLiveData((prev) => { const n = { ...prev }; delete n[item.ticker]; return n; });
+      setBuyId(null);
+      await load();
+    } catch { /* ignore */ } finally {
+      setBuyLoading(false);
     }
   }
 
@@ -308,13 +371,32 @@ export default function WatchList() {
                   : null;
 
               const days = daysSince(item.watch_date);
+
+              // Trend: use since-watch momentum
               const trending =
                 watchPricePct == null ? null : watchPricePct > 0.5 ? 'up' : watchPricePct < -0.5 ? 'down' : 'flat';
+
+              // Entry zone: compare current price vs target entry
+              const vsEntry =
+                currentPrice && item.target_entry
+                  ? currentPrice - item.target_entry
+                  : null;
+              const entryZone =
+                vsEntry == null ? 'neutral' : vsEntry > 0 ? 'above' : 'below';
+
+              const cardBorder =
+                entryZone === 'above'
+                  ? 'border-red-800/70 bg-red-950/20'
+                  : entryZone === 'below'
+                  ? 'border-emerald-800/70 bg-emerald-950/20'
+                  : 'border-zinc-800 bg-zinc-800/40';
+
+              const isBuying = buyId === item.id;
 
               return (
                 <div
                   key={item.id}
-                  className="p-4 bg-zinc-800/40 rounded-lg border border-zinc-800 hover:border-zinc-700 transition-colors"
+                  className={`p-4 rounded-lg border transition-colors ${cardBorder}`}
                 >
                   <div className="flex items-center gap-4 flex-wrap">
                     {/* Ticker & conviction */}
@@ -331,7 +413,7 @@ export default function WatchList() {
                       </span>
                     </div>
 
-                    {/* Watch price → current price */}
+                    {/* Watch price → current price + trend */}
                     <div className="flex items-center gap-3 flex-shrink-0">
                       {/* Watch entry */}
                       <div className="text-center">
@@ -341,8 +423,8 @@ export default function WatchList() {
                         </div>
                       </div>
 
-                      {/* Arrow */}
-                      <div className="text-zinc-600">
+                      {/* Trend arrow (since watch) */}
+                      <div className="flex flex-col items-center gap-0.5">
                         {trending === 'up' ? (
                           <TrendingUp size={18} className="text-emerald-400" />
                         ) : trending === 'down' ? (
@@ -350,6 +432,11 @@ export default function WatchList() {
                         ) : (
                           <Minus size={18} className="text-zinc-500" />
                         )}
+                        <span className={`text-[10px] font-medium ${
+                          trending === 'up' ? 'text-emerald-500' : trending === 'down' ? 'text-red-500' : 'text-zinc-600'
+                        }`}>
+                          {trending === 'up' ? 'UP' : trending === 'down' ? 'DOWN' : 'FLAT'}
+                        </span>
                       </div>
 
                       {/* Current price */}
@@ -366,6 +453,25 @@ export default function WatchList() {
                         )}
                       </div>
                     </div>
+
+                    {/* Entry zone badge */}
+                    {vsEntry != null && item.target_entry && (
+                      <div className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-center border ${
+                        entryZone === 'below'
+                          ? 'bg-emerald-900/40 border-emerald-700'
+                          : 'bg-red-900/40 border-red-800'
+                      }`}>
+                        <div className={`text-xs font-semibold ${entryZone === 'below' ? 'text-emerald-300' : 'text-red-400'}`}>
+                          {entryZone === 'below' ? '✓ BUY ZONE' : '✗ ABOVE ENTRY'}
+                        </div>
+                        <div className="text-xs text-zinc-500 mt-0.5">
+                          Entry: {fmtCurrency(item.target_entry)}
+                        </div>
+                        <div className={`text-xs font-mono font-bold ${entryZone === 'below' ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {vsEntry > 0 ? '+' : ''}{fmtCurrency(vsEntry)}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Since-watch performance */}
                     {watchPricePct != null && (
@@ -426,21 +532,11 @@ export default function WatchList() {
                       </div>
                     )}
 
-                    {/* Target entry / analyst target */}
-                    {(item.target_entry || item.analyst_target) && (
-                      <div className="hidden sm:flex flex-col gap-1 text-xs flex-shrink-0">
-                        {item.target_entry && (
-                          <div>
-                            <span className="text-zinc-600">Entry: </span>
-                            <span className="text-amber-400 font-mono">{fmtCurrency(item.target_entry)}</span>
-                          </div>
-                        )}
-                        {item.analyst_target && (
-                          <div>
-                            <span className="text-zinc-600">PT: </span>
-                            <span className="text-blue-400 font-mono">{fmtCurrency(item.analyst_target)}</span>
-                          </div>
-                        )}
+                    {/* Analyst target (only if no entry zone badge, or always show) */}
+                    {item.analyst_target && (
+                      <div className="hidden sm:block text-xs flex-shrink-0">
+                        <span className="text-zinc-600">PT: </span>
+                        <span className="text-blue-400 font-mono">{fmtCurrency(item.analyst_target)}</span>
                       </div>
                     )}
 
@@ -458,11 +554,80 @@ export default function WatchList() {
                       >
                         <RefreshCw size={13} className={ld?.loading ? 'animate-spin' : ''} />
                       </button>
+                      <button
+                        onClick={() => isBuying ? setBuyId(null) : openBuyForm(item)}
+                        className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
+                          isBuying
+                            ? 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+                            : 'bg-emerald-700 hover:bg-emerald-600 text-white'
+                        }`}
+                        title="Buy — move to portfolio"
+                      >
+                        {isBuying ? <X size={12} /> : <ShoppingCart size={12} />}
+                        {isBuying ? 'Cancel' : 'Buy'}
+                      </button>
                       <button onClick={() => handleDelete(item.id, item.ticker)} className="btn-danger">
                         <Trash2 size={12} />
                       </button>
                     </div>
                   </div>
+
+                  {/* Inline buy form */}
+                  {isBuying && (
+                    <div className="mt-3 pt-3 border-t border-zinc-700/50 flex flex-wrap gap-3 items-end">
+                      <div>
+                        <label className="label">Shares *</label>
+                        <input
+                          className="input-base w-24"
+                          type="number"
+                          step="0.0001"
+                          min="0.0001"
+                          placeholder="100"
+                          value={buyShares}
+                          onChange={(e) => setBuyShares(e.target.value)}
+                          autoFocus
+                        />
+                      </div>
+                      <div>
+                        <label className="label">Avg Cost *</label>
+                        <input
+                          className="input-base w-28"
+                          type="number"
+                          step="0.01"
+                          min="0.01"
+                          placeholder="0.00"
+                          value={buyPrice}
+                          onChange={(e) => setBuyPrice(e.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <label className="label">Account</label>
+                        <select className="select-base w-28" value={buyAccount} onChange={(e) => setBuyAccount(e.target.value)}>
+                          {['TFSA', 'RRSP', 'Margin', 'Cash', 'Other'].map((a) => (
+                            <option key={a} value={a}>{a}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="label">Currency</label>
+                        <select className="select-base w-24" value={buyCurrency} onChange={(e) => setBuyCurrency(e.target.value)}>
+                          <option>USD</option>
+                          <option>CAD</option>
+                        </select>
+                      </div>
+                      <button
+                        onClick={() => handleBuy(item)}
+                        disabled={buyLoading || !buyShares || !buyPrice}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded transition-colors"
+                      >
+                        <Check size={13} />
+                        {buyLoading ? 'Adding…' : 'Confirm Buy'}
+                      </button>
+                      <p className="text-xs text-zinc-600 w-full mt-1">
+                        This will add {item.ticker} to your Portfolio and remove it from the Watch List.
+                      </p>
+                    </div>
+                  )}
                 </div>
               );
             })}
