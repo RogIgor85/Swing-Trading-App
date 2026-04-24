@@ -287,8 +287,13 @@ export function scoreSwing(
   const capScore   = scoreMarketCap(marketCap);
   const betaScore  = scoreBeta(beta);
   if (beta == null) gaps.push('⚠️ Beta — not available');
-  const shortScore = scoreShortInterest(ks?.shortPercentOfFloat);
-  if (ks?.shortPercentOfFloat == null) gaps.push('⚠️ Short interest — not available');
+  const finnhubShortPct =
+    m?.shortInterest != null && m?.sharesFloat != null && m.sharesFloat > 0
+      ? m.shortInterest / m.sharesFloat
+      : null;
+  const shortPct = ks?.shortPercentOfFloat ?? finnhubShortPct;
+  const shortScore = scoreShortInterest(shortPct);
+  if (shortPct == null) gaps.push('⚠️ Short interest — not available');
   const deScore    = scoreDebtEquity(fd?.debtToEquity);
 
   const riskScore = round2(capScore * 0.25 + betaScore * 0.35 + shortScore * 0.25 + deScore * 0.15);
@@ -567,8 +572,13 @@ export function buildRiskFlags(
   const ks = yahoo.defaultKeyStatistics;
   const sd = yahoo.summaryDetail;
 
-  // Short interest
-  const si = ks?.shortPercentOfFloat;
+  // Short interest: Yahoo primary, Finnhub shortInterest/sharesFloat as fallback
+  const yahooSi = ks?.shortPercentOfFloat;
+  const finnhubSi =
+    m?.shortInterest != null && m?.sharesFloat != null && m.sharesFloat > 0
+      ? m.shortInterest / m.sharesFloat
+      : null;
+  const si = yahooSi ?? finnhubSi;
   if (si != null) {
     const pct = (si * 100).toFixed(1);
     flags.push({

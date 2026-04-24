@@ -314,6 +314,8 @@ export default function TriFrameScorecard() {
   const [error, setError] = useState<string | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [yahooData, setYahooData] = useState<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [finnhubMetrics, setFinnhubMetrics] = useState<any>(null);
   const [addedToWatch, setAddedToWatch] = useState(false);
   const [addingWatch,  setAddingWatch]  = useState(false);
   const [headerEntry,  setHeaderEntry]  = useState('');
@@ -342,6 +344,7 @@ export default function TriFrameScorecard() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setFinnhubMetrics(null);
 
     try {
       // TSX and other exchange suffixes — strip for Finnhub, keep for Yahoo Finance
@@ -415,6 +418,7 @@ export default function TriFrameScorecard() {
       const res = runTriFrame(t, quote, profile, metrics, sentiment, yahoo, accountSize);
       setResult(res);
       setYahooData(yahoo);
+      setFinnhubMetrics(metrics);
       setAddedToWatch(false);
       setHeaderEntry('');
       setHeaderExit('');
@@ -603,7 +607,14 @@ export default function TriFrameScorecard() {
               const ma200 = yNum(sd?.twoHundredDayAverage);
               const wk52Hi = yNum(sd?.fiftyTwoWeekHigh);
               const wk52Lo = yNum(sd?.fiftyTwoWeekLow);
-              const shortPct = yNum(ks?.shortPercentOfFloat) ?? yNum(sd?.shortPercentOfFloat);
+              // Short interest: Yahoo is primary; fall back to Finnhub shortInterest/sharesFloat ratio
+              const yahooShortPct = yNum(ks?.shortPercentOfFloat) ?? yNum(sd?.shortPercentOfFloat);
+              const fm = finnhubMetrics?.metric;
+              const finnhubShortPct =
+                fm?.shortInterest != null && fm?.sharesFloat != null && fm.sharesFloat > 0
+                  ? fm.shortInterest / fm.sharesFloat
+                  : null;
+              const shortPct = yahooShortPct ?? finnhubShortPct;
               const earningsDate = getNextEarningsDate(yahooData);
               const cp = result.currentPrice;
 

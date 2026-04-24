@@ -141,6 +141,9 @@ export interface FinnhubMetrics {
     netProfitMarginTTM: number;
     beta: number;
     dividendYieldIndicatedAnnual: number;
+    // Short interest fields (available on Finnhub basic)
+    shortInterest?: number | null;   // shares currently sold short
+    sharesFloat?: number | null;     // total float shares
   };
 }
 
