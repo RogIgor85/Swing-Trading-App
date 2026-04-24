@@ -7,8 +7,22 @@ import { storage, newId, nowIso } from '../../lib/storage';
 import { fmtCurrency, fmt } from '../../lib/utils';
 import type { TriFrameResult, SwingScore, MediumScore, LongScore, FlagSeverity } from '../../types/scorecard';
 
-interface FrameLevels { entry: string; exit: string }
 const TABLE_WATCH = 'watch_items';
+
+// Extract next earnings date from Yahoo calendarEvents
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getNextEarningsDate(yahooData: any): string | null {
+  const dates: any[] = yahooData?.calendarEvents?.earnings?.earningsDate ?? [];
+  const now = Date.now();
+  for (const d of dates) {
+    const ts = typeof d === 'object' ? (d.raw ?? d) : d;
+    const ms = typeof ts === 'number' ? ts * 1000 : new Date(ts).getTime();
+    if (!isNaN(ms) && ms > now) {
+      return new Date(ms).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+  }
+  return null;
+}
 
 // Yahoo Finance sometimes returns {raw: number, fmt: string} even with formatted=false
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -52,14 +66,6 @@ const FLAG_DEFINITIONS: Record<string, { summary: string; bullets: string[] }> =
       '5–10% — elevated, worth monitoring',
       '>10% — HIGH short interest; squeeze risk if positive news hits',
       '>20% — very crowded short; explosive squeeze potential but strong bearish conviction',
-    ],
-  },
-  'Days to Cover': {
-    summary: 'Days needed for all short sellers to buy back shares at current volume.',
-    bullets: [
-      '<3 days — shorts can exit quickly, low squeeze risk',
-      '5–10 days — meaningful squeeze potential',
-      '>10 days — significant squeeze risk; shorts are trapped if catalyst hits',
     ],
   },
   'Avg Volume': {
@@ -589,7 +595,7 @@ export default function TriFrameScorecard() {
               </div>
             </div>
 
-            {/* Market data row: MAs + short interest */}
+            {/* Market data row: MAs + short interest + earnings */}
             {(() => {
               const sd  = yahooData?.summaryDetail;
               const ks  = yahooData?.defaultKeyStatistics;
@@ -598,10 +604,11 @@ export default function TriFrameScorecard() {
               const wk52Hi = yNum(sd?.fiftyTwoWeekHigh);
               const wk52Lo = yNum(sd?.fiftyTwoWeekLow);
               const shortPct = yNum(ks?.shortPercentOfFloat) ?? yNum(sd?.shortPercentOfFloat);
+              const earningsDate = getNextEarningsDate(yahooData);
               const cp = result.currentPrice;
 
               return (
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                   <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
                     <div className="text-xs text-zinc-500 mb-0.5">50D MA</div>
                     <div className={`text-sm font-semibold tabular-nums ${ma50 ? (cp > ma50 ? 'text-emerald-400' : 'text-red-400') : 'text-zinc-300'}`}>
@@ -620,6 +627,12 @@ export default function TriFrameScorecard() {
                     <div className="text-xs text-zinc-500 mb-0.5">Short Interest</div>
                     <div className="text-sm font-semibold tabular-nums text-zinc-300">
                       {shortPct != null ? `${(shortPct * 100).toFixed(1)}%` : '—'}
+                    </div>
+                  </div>
+                  <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
+                    <div className="text-xs text-zinc-500 mb-0.5">Next Earnings</div>
+                    <div className="text-sm font-semibold tabular-nums text-amber-300">
+                      {earningsDate ?? '—'}
                     </div>
                   </div>
                   <div className="bg-zinc-800/50 rounded-lg px-3 py-2">
