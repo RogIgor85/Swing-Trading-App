@@ -133,41 +133,57 @@ async function tryV7Quote(ticker: string): Promise<any> {
   } catch { return null; }
 }
 
-// ─── Layer E: fundamentals timeseries — short interest only ──────────────────
-// Uses a completely different Yahoo subdomain (ws.fundamentals-timeseries),
-// which is less likely to be IP-blocked than quoteSummary.
-async function tryShortInterest(ticker: string): Promise<number | null> {
+// ─── Layer E: HTML scrape — extract short interest + earnings from page HTML ──
+// Yahoo Finance embeds raw JSON data in the page HTML. Scraping the page is
+// often possible even when API endpoints are blocked from Vercel IPs.
+async function tryHTMLScrape(ticker: string): Promise<{ shortPercentOfFloat: number | null; earningsDateTs: number | null }> {
+  const empty = { shortPercentOfFloat: null, earningsDateTs: null };
   try {
-    const now   = Math.floor(Date.now() / 1000);
-    const year  = now - 365 * 24 * 3600;
-    const url   = `https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${encodeURIComponent(ticker)}` +
-                  `?type=trailingShortPercentOfFloat&period1=${year}&period2=${now}&lang=en-US&region=US`;
+    const r = await fetch(
+      `https://finance.yahoo.com/quote/${encodeURIComponent(ticker)}/`,
+      { headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9', Accept: 'text/html' } }
+    );
+    if (!r.ok) return empty;
+    const html = await r.text();
+
+    // Short interest — Yahoo embeds as {"raw":0.0064,"fmt":"0.64%"} or bare number
+    let shortPct: number | null = null;
+    const m1 = html.match(/"shortPercentOfFloat"\s*:\s*\{\s*"raw"\s*:\s*([\d.eE+\-]+)/);
+    const m2 = !m1 ? html.match(/"shortPercentOfFloat"\s*:\s*([\d.eE+\-]+)/) : null;
+    const rawStr = (m1 ?? m2)?.[1];
+    if (rawStr) {
+      const v = parseFloat(rawStr);
+      if (!isNaN(v) && v > 0) shortPct = v;
+    }
+
+    // Next earnings date — embedded as {"raw":1746302400,"fmt":"2025-05-03"}
+    let earningsDateTs: number | null = null;
+    const em = html.match(/"earningsDate"\s*:\s*\[\s*\{\s*"raw"\s*:\s*(\d+)/);
+    if (em) {
+      const ts = parseInt(em[1], 10);
+      if (!isNaN(ts) && ts * 1000 > Date.now()) earningsDateTs = ts;
+    }
+
+    return { shortPercentOfFloat: shortPct, earningsDateTs };
+  } catch { return empty; }
+}
+
+// ─── Layer F: fundamentals timeseries — short interest fallback ───────────────
+async function tryShortInterestTimeseries(ticker: string): Promise<number | null> {
+  try {
+    const now  = Math.floor(Date.now() / 1000);
+    const year = now - 365 * 24 * 3600;
+    const url  = `https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${encodeURIComponent(ticker)}` +
+                 `?type=trailingShortPercentOfFloat&period1=${year}&period2=${now}&lang=en-US&region=US`;
     const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
     if (!r.ok) return null;
     const j: any = await r.json();
-    // Response: { timeseries: { result: [{ trailingShortPercentOfFloat: [{reportedValue:{raw}}] }] } }
     const rows: any[] = j?.timeseries?.result?.[0]?.trailingShortPercentOfFloat ?? [];
-    if (!rows.length) return null;
-    // Take the most recent non-null value
     for (let i = rows.length - 1; i >= 0; i--) {
       const v = rows[i]?.reportedValue?.raw;
       if (v != null && typeof v === 'number') return v;
     }
     return null;
-  } catch { return null; }
-}
-
-// ─── Layer F: calendar-only quoteSummary (lightweight, may succeed when full
-//              quoteSummary is blocked) ───────────────────────────────────────
-async function tryCalendarOnly(ticker: string): Promise<any | null> {
-  try {
-    const r = await fetch(
-      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=calendarEvents%2CdefaultKeyStatistics&formatted=false`,
-      { headers: { 'User-Agent': UA, Accept: 'application/json' } }
-    );
-    if (!r.ok) return null;
-    const j: any = await r.json();
-    return j?.quoteSummary?.result?.[0] ?? null;
   } catch { return null; }
 }
 
@@ -240,28 +256,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (result) {
-      // If the primary result is partial (came from chart or v7, not quoteSummary),
-      // attempt lightweight supplementary fetches in parallel for the missing fields.
-      if (result._partial) {
-        const [siVal, calData] = await Promise.all([
-          tryShortInterest(t),
-          tryCalendarOnly(t),
+      // Check whether we're missing short interest or calendar events
+      const missingShort    = result.defaultKeyStatistics?.shortPercentOfFloat == null;
+      const missingCalendar = result.calendarEvents == null;
+
+      if (result._partial || missingShort || missingCalendar) {
+        // Run supplementary fetches in parallel — HTML scrape is the most reliable
+        // since the page is less aggressively blocked than API endpoints.
+        const [htmlData, tsVal] = await Promise.all([
+          tryHTMLScrape(t),
+          missingShort ? tryShortInterestTimeseries(t) : Promise.resolve(null),
         ]);
-        // Merge short interest
+
+        // Merge short interest — HTML scrape wins, timeseries as secondary fallback
+        const siVal = htmlData.shortPercentOfFloat ?? tsVal;
         if (siVal != null) {
           if (!result.defaultKeyStatistics) result.defaultKeyStatistics = {};
-          result.defaultKeyStatistics.shortPercentOfFloat = siVal;
+          if (result.defaultKeyStatistics.shortPercentOfFloat == null)
+            result.defaultKeyStatistics.shortPercentOfFloat = siVal;
         }
-        // Merge calendar events + key stats from lightweight quoteSummary if it worked
-        if (calData) {
-          if (calData.calendarEvents && !result.calendarEvents)
-            result.calendarEvents = calData.calendarEvents;
-          if (calData.defaultKeyStatistics) {
-            result.defaultKeyStatistics = {
-              ...calData.defaultKeyStatistics,
-              ...(result.defaultKeyStatistics ?? {}),
-            };
-          }
+
+        // Merge earnings date from HTML scrape when calendar is missing
+        if (missingCalendar && htmlData.earningsDateTs != null) {
+          result.calendarEvents = {
+            earnings: {
+              earningsDate: [{ raw: htmlData.earningsDateTs, fmt: new Date(htmlData.earningsDateTs * 1000).toISOString().split('T')[0] }],
+            },
+          };
         }
       }
       return res.status(200).json(result);
