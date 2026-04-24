@@ -1,10 +1,14 @@
 import { useState, useRef, useEffect } from 'react';
-import { Search, Star, Pencil, Check, X, AlertTriangle, TrendingUp, Clock, BarChart2 } from 'lucide-react';
+import { Search, Star, Pencil, Check, X, AlertTriangle, TrendingUp, Clock, BarChart2, Eye } from 'lucide-react';
 import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
 import { runTriFrame, loadSettings, saveSettings } from '../../lib/scoring';
+import { storage, newId, nowIso } from '../../lib/storage';
 import { fmtCurrency, fmt } from '../../lib/utils';
 import type { TriFrameResult, SwingScore, MediumScore, LongScore, FlagSeverity } from '../../types/scorecard';
+
+interface FrameLevels { entry: string; exit: string }
+const TABLE_WATCH = 'watch_items';
 
 // ─── Verdict styling ──────────────────────────────────────────────────────────
 const SWING_VERDICT_STYLE: Record<string, string> = {
@@ -248,6 +252,13 @@ export default function TriFrameScorecard() {
   const [result, setResult] = useState<TriFrameResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [yahooData, setYahooData] = useState<any>(null);
+  const [swingLevels,  setSwingLevels]  = useState<FrameLevels>({ entry: '', exit: '' });
+  const [mediumLevels, setMediumLevels] = useState<FrameLevels>({ entry: '', exit: '' });
+  const [longLevels,   setLongLevels]   = useState<FrameLevels>({ entry: '', exit: '' });
+  const [addedToWatch, setAddedToWatch] = useState(false);
+  const [addingWatch,  setAddingWatch]  = useState(false);
 
   // Account size
   const [accountSize, setAccountSize] = useState<number>(() => loadSettings().accountSize ?? 0);
@@ -344,10 +355,46 @@ export default function TriFrameScorecard() {
 
       const res = runTriFrame(t, quote, profile, metrics, sentiment, yahoo, accountSize);
       setResult(res);
+      setYahooData(yahoo);
+      setAddedToWatch(false);
+      // Auto-populate levels from scoring engine
+      setSwingLevels({
+        entry: res.swing.position?.entry  ? res.swing.position.entry.toFixed(2)  : (quote?.c ? quote.c.toFixed(2) : ''),
+        exit:  res.swing.position?.target ? res.swing.position.target.toFixed(2) : '',
+      });
+      setMediumLevels({
+        entry: quote?.c ? quote.c.toFixed(2) : '',
+        exit:  res.medium.target12m ? res.medium.target12m.toFixed(2) : '',
+      });
+      setLongLevels({
+        entry: quote?.c ? quote.c.toFixed(2) : '',
+        exit:  '',
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unexpected error — check console.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleAddToWatchlist() {
+    if (!result) return;
+    setAddingWatch(true);
+    try {
+      await storage.insert(TABLE_WATCH, {
+        id:            newId(),
+        ticker:        result.ticker,
+        conviction:    'MEDIUM',
+        notes:         '',
+        watch_price:   result.currentPrice,
+        watch_date:    new Date().toISOString().split('T')[0],
+        analyst_target: null,
+        target_entry:  swingLevels.entry ? parseFloat(swingLevels.entry) : null,
+        created_at:    nowIso(),
+      });
+      setAddedToWatch(true);
+    } catch { /* ignore */ } finally {
+      setAddingWatch(false);
     }
   }
 
@@ -436,7 +483,7 @@ export default function TriFrameScorecard() {
         <>
           {/* Company header */}
           <div className="card">
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3 mb-4">
               <div className="font-mono font-bold text-blue-400 text-2xl">{result.ticker}</div>
               <div className="text-zinc-200 font-semibold text-lg">{result.companyName}</div>
               <span className={`text-xs px-2 py-0.5 rounded border bg-zinc-800 ${TIER_BADGE[result.tier]}`}>
@@ -445,16 +492,77 @@ export default function TriFrameScorecard() {
               <span className="text-xs text-zinc-500">{result.exchange}</span>
               <span className="text-xs text-zinc-600">·</span>
               <span className="text-xs text-zinc-500">{result.industry}</span>
-              <div className="ml-auto text-right">
-                <div className="text-2xl font-bold tabular-nums">{fmtCurrency(result.currentPrice)}</div>
-                <div className="text-xs text-zinc-500">
-                  Mkt cap: {result.marketCap >= 1e12
-                    ? `$${(result.marketCap / 1e12).toFixed(2)}T`
-                    : result.marketCap >= 1e9
-                    ? `$${(result.marketCap / 1e9).toFixed(1)}B`
-                    : `$${(result.marketCap / 1e6).toFixed(0)}M`}
+              <div className="ml-auto flex items-center gap-3">
+                <div className="text-right">
+                  <div className="text-2xl font-bold tabular-nums">{fmtCurrency(result.currentPrice)}</div>
+                  <div className="text-xs text-zinc-500">
+                    Mkt cap: {result.marketCap >= 1e12
+                      ? `$${(result.marketCap / 1e12).toFixed(2)}T`
+                      : result.marketCap >= 1e9
+                      ? `$${(result.marketCap / 1e9).toFixed(1)}B`
+                      : `$${(result.marketCap / 1e6).toFixed(0)}M`}
+                  </div>
                 </div>
+                <button
+                  onClick={handleAddToWatchlist}
+                  disabled={addingWatch || addedToWatch}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    addedToWatch
+                      ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-700 cursor-default'
+                      : 'bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50'
+                  }`}
+                >
+                  <Eye size={13} />
+                  {addedToWatch ? 'Added!' : addingWatch ? 'Adding…' : 'Watch List'}
+                </button>
               </div>
+            </div>
+
+            {/* Market data row: MAs + short interest */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {[
+                {
+                  label: '50D MA',
+                  value: yahooData?.summaryDetail?.fiftyDayAverage
+                    ? fmtCurrency(yahooData.summaryDetail.fiftyDayAverage)
+                    : '—',
+                  color: yahooData?.summaryDetail?.fiftyDayAverage && result.currentPrice
+                    ? result.currentPrice > yahooData.summaryDetail.fiftyDayAverage
+                      ? 'text-emerald-400' : 'text-red-400'
+                    : 'text-zinc-300',
+                },
+                {
+                  label: '200D MA',
+                  value: yahooData?.summaryDetail?.twoHundredDayAverage
+                    ? fmtCurrency(yahooData.summaryDetail.twoHundredDayAverage)
+                    : '—',
+                  color: yahooData?.summaryDetail?.twoHundredDayAverage && result.currentPrice
+                    ? result.currentPrice > yahooData.summaryDetail.twoHundredDayAverage
+                      ? 'text-emerald-400' : 'text-red-400'
+                    : 'text-zinc-300',
+                },
+                {
+                  label: 'Short Interest',
+                  value: yahooData?.defaultKeyStatistics?.shortPercentOfFloat != null
+                    ? `${(yahooData.defaultKeyStatistics.shortPercentOfFloat * 100).toFixed(1)}%`
+                    : yahooData?.summaryDetail?.shortPercentOfFloat != null
+                    ? `${(yahooData.summaryDetail.shortPercentOfFloat * 100).toFixed(1)}%`
+                    : '—',
+                  color: 'text-zinc-300',
+                },
+                {
+                  label: '52W Range',
+                  value: yahooData?.summaryDetail?.fiftyTwoWeekLow && yahooData?.summaryDetail?.fiftyTwoWeekHigh
+                    ? `${fmtCurrency(yahooData.summaryDetail.fiftyTwoWeekLow)} – ${fmtCurrency(yahooData.summaryDetail.fiftyTwoWeekHigh)}`
+                    : '—',
+                  color: 'text-zinc-300',
+                },
+              ].map(({ label, value, color }) => (
+                <div key={label} className="bg-zinc-800/50 rounded-lg px-3 py-2">
+                  <div className="text-xs text-zinc-500 mb-0.5">{label}</div>
+                  <div className={`text-sm font-semibold tabular-nums ${color}`}>{value}</div>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -463,6 +571,126 @@ export default function TriFrameScorecard() {
             <SwingCard  s={result.swing}  isBest={bf === 'SWING'} />
             <MediumCard m={result.medium} isBest={bf === 'MEDIUM'} />
             <LongCard   l={result.long}   isBest={bf === 'LONG'} />
+          </div>
+
+          {/* Your Price Levels */}
+          <div className="card">
+            <h3 className="text-sm font-semibold text-zinc-100 mb-4">Your Price Levels</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {/* Swing */}
+              <div className="bg-zinc-800/40 rounded-xl border border-blue-900/50 p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <TrendingUp size={13} className="text-blue-400" />
+                  <span className="text-xs font-semibold text-blue-300 uppercase tracking-wide">Swing (3–21d)</span>
+                </div>
+                <div className="space-y-2">
+                  <div>
+                    <label className="text-xs text-zinc-500 mb-1 block">Entry Price</label>
+                    <input
+                      type="number" step="0.01"
+                      className="input-base w-full text-sm font-mono"
+                      placeholder="e.g. 145.00"
+                      value={swingLevels.entry}
+                      onChange={(e) => setSwingLevels((p) => ({ ...p, entry: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-zinc-500 mb-1 block">Exit / Target Price</label>
+                    <input
+                      type="number" step="0.01"
+                      className="input-base w-full text-sm font-mono"
+                      placeholder="e.g. 165.00"
+                      value={swingLevels.exit}
+                      onChange={(e) => setSwingLevels((p) => ({ ...p, exit: e.target.value }))}
+                    />
+                  </div>
+                  {swingLevels.entry && swingLevels.exit && (
+                    <div className={`text-xs font-semibold tabular-nums text-center py-1 rounded ${
+                      parseFloat(swingLevels.exit) > parseFloat(swingLevels.entry)
+                        ? 'text-emerald-400 bg-emerald-900/30' : 'text-red-400 bg-red-900/30'
+                    }`}>
+                      {((parseFloat(swingLevels.exit) - parseFloat(swingLevels.entry)) / parseFloat(swingLevels.entry) * 100).toFixed(1)}% potential
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Medium */}
+              <div className="bg-zinc-800/40 rounded-xl border border-purple-900/50 p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <BarChart2 size={13} className="text-purple-400" />
+                  <span className="text-xs font-semibold text-purple-300 uppercase tracking-wide">Medium (6–12m)</span>
+                </div>
+                <div className="space-y-2">
+                  <div>
+                    <label className="text-xs text-zinc-500 mb-1 block">Entry Price</label>
+                    <input
+                      type="number" step="0.01"
+                      className="input-base w-full text-sm font-mono"
+                      placeholder="e.g. 145.00"
+                      value={mediumLevels.entry}
+                      onChange={(e) => setMediumLevels((p) => ({ ...p, entry: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-zinc-500 mb-1 block">Exit / Target Price</label>
+                    <input
+                      type="number" step="0.01"
+                      className="input-base w-full text-sm font-mono"
+                      placeholder="e.g. 200.00"
+                      value={mediumLevels.exit}
+                      onChange={(e) => setMediumLevels((p) => ({ ...p, exit: e.target.value }))}
+                    />
+                  </div>
+                  {mediumLevels.entry && mediumLevels.exit && (
+                    <div className={`text-xs font-semibold tabular-nums text-center py-1 rounded ${
+                      parseFloat(mediumLevels.exit) > parseFloat(mediumLevels.entry)
+                        ? 'text-emerald-400 bg-emerald-900/30' : 'text-red-400 bg-red-900/30'
+                    }`}>
+                      {((parseFloat(mediumLevels.exit) - parseFloat(mediumLevels.entry)) / parseFloat(mediumLevels.entry) * 100).toFixed(1)}% potential
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Long */}
+              <div className="bg-zinc-800/40 rounded-xl border border-emerald-900/50 p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <Clock size={13} className="text-emerald-400" />
+                  <span className="text-xs font-semibold text-emerald-300 uppercase tracking-wide">Long (2+ yrs)</span>
+                </div>
+                <div className="space-y-2">
+                  <div>
+                    <label className="text-xs text-zinc-500 mb-1 block">Entry Price</label>
+                    <input
+                      type="number" step="0.01"
+                      className="input-base w-full text-sm font-mono"
+                      placeholder="e.g. 145.00"
+                      value={longLevels.entry}
+                      onChange={(e) => setLongLevels((p) => ({ ...p, entry: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-zinc-500 mb-1 block">Exit / Target Price</label>
+                    <input
+                      type="number" step="0.01"
+                      className="input-base w-full text-sm font-mono"
+                      placeholder="e.g. 250.00"
+                      value={longLevels.exit}
+                      onChange={(e) => setLongLevels((p) => ({ ...p, exit: e.target.value }))}
+                    />
+                  </div>
+                  {longLevels.entry && longLevels.exit && (
+                    <div className={`text-xs font-semibold tabular-nums text-center py-1 rounded ${
+                      parseFloat(longLevels.exit) > parseFloat(longLevels.entry)
+                        ? 'text-emerald-400 bg-emerald-900/30' : 'text-red-400 bg-red-900/30'
+                    }`}>
+                      {((parseFloat(longLevels.exit) - parseFloat(longLevels.entry)) / parseFloat(longLevels.entry) * 100).toFixed(1)}% potential
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Best fit banner */}
