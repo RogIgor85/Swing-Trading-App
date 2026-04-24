@@ -35,6 +35,19 @@ const FLAG_SEVERITY: Record<FlagSeverity, string> = {
   MEDIUM: 'text-amber-400',
   HIGH:   'text-red-400',
 };
+const FLAG_DEFINITIONS: Record<string, string> = {
+  'Beta':
+    'Measures volatility vs the S&P 500. Beta 1.0 = moves with the market. >1.5 = amplified swings in both directions — bigger gains but bigger drawdowns. Factor into your stop placement.',
+  'Short Interest':
+    'Percentage of the float sold short. >10% is elevated; >20% is HIGH. High short interest can trigger a short squeeze (rapid rally) but also signals bearish institutional conviction.',
+  'Days to Cover':
+    'How many days of average volume it would take all short sellers to buy back their shares. >5 days = squeeze risk. >10 days = significant squeeze potential if positive catalyst hits.',
+  'Avg Volume':
+    'Average daily shares traded. LOW volume (<500K) means wide bid/ask spreads, harder to exit quickly, and easier for large orders to move price against you.',
+  'Next Earnings':
+    'Days until the next earnings report. Earnings can cause 5–20%+ gaps overnight. Holding through earnings is a binary event — consider reducing size or closing before the date.',
+};
+
 const TIER_BADGE: Record<string, string> = {
   LARGE: 'text-blue-400 border-blue-700',
   MID:   'text-purple-400 border-purple-700',
@@ -619,12 +632,27 @@ export default function TriFrameScorecard() {
                 <AlertTriangle size={14} className="text-amber-400" /> Risk Flags
               </h3>
               <div className="flex flex-wrap gap-3">
-                {result.riskFlags.map((f, i) => (
-                  <div key={i} className="bg-zinc-800 rounded-lg px-3 py-2 flex flex-col gap-0.5">
-                    <span className="text-xs text-zinc-500">{f.label}</span>
-                    <span className={`text-sm font-semibold tabular-nums ${FLAG_SEVERITY[f.severity]}`}>{f.value}</span>
-                  </div>
-                ))}
+                {result.riskFlags.map((f, i) => {
+                  const def = FLAG_DEFINITIONS[f.label];
+                  return (
+                    <div key={i} className="relative group bg-zinc-800 rounded-lg px-3 py-2 flex flex-col gap-0.5 cursor-default">
+                      <span className="text-xs text-zinc-500 flex items-center gap-1">
+                        {f.label}
+                        {def && <span className="text-zinc-600 text-[10px]">(?)</span>}
+                      </span>
+                      <span className={`text-sm font-semibold tabular-nums ${FLAG_SEVERITY[f.severity]}`}>{f.value}</span>
+                      {/* Tooltip */}
+                      {def && (
+                        <div className="absolute bottom-full left-0 mb-2 w-72 z-20 hidden group-hover:block">
+                          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-3 shadow-xl">
+                            <div className="text-xs font-semibold text-zinc-200 mb-1">{f.label}</div>
+                            <p className="text-xs text-zinc-400 leading-relaxed">{def}</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
