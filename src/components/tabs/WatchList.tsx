@@ -91,6 +91,11 @@ export default function WatchList() {
 
       if (q && q.c && q.c > 0) {
         setLiveData((prev) => ({ ...prev, [item.ticker]: { quote: q, sentiment, loading: false } }));
+        // Backfill missing watch price
+        if (!item.watch_price) {
+          await storage.update(TABLE, item.id, { watch_price: q.c });
+          setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, watch_price: q.c } : i));
+        }
         return;
       }
 
@@ -112,6 +117,11 @@ export default function WatchList() {
           pc: y.price?.regularMarketPreviousClose ?? price,
         };
         setLiveData((prev) => ({ ...prev, [item.ticker]: { quote: syntheticQuote, sentiment, loading: false } }));
+        // Backfill missing watch price
+        if (!item.watch_price) {
+          await storage.update(TABLE, item.id, { watch_price: price });
+          setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, watch_price: price } : i));
+        }
       } else {
         setLiveData((prev) => ({ ...prev, [item.ticker]: { loading: false, error: 'No price data' } }));
       }
