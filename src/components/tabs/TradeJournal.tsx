@@ -65,7 +65,6 @@ const SORT_COLS: { label: string; key: SortKey }[] = [
   { label: 'P&L',        key: 'realized_pnl'     },
   { label: 'P&L %',      key: 'realized_pnl_pct' },
   { label: 'Result',     key: 'status'           },
-  { label: 'Strategy',   key: 'strategy'         },
 ];
 
 function SortIcon({ col, sortKey, sortDir }: { col: SortKey; sortKey: SortKey; sortDir: 'asc' | 'desc' }) {
@@ -611,7 +610,6 @@ export default function TradeJournal() {
                         <span className="text-xs bg-red-900/40 text-red-300 border border-red-700 px-2 py-0.5 rounded-full">LOSS</span>
                       )}
                     </td>
-                    <td className="td text-xs text-zinc-500 max-w-28 truncate">{t.strategy}</td>
                     <td className="td">
                       <div className="flex gap-1">
                         <button onClick={() => startEdit(t)} className="btn-ghost p-1" title="Edit trade"><Edit2 size={12} /></button>
