@@ -17,7 +17,7 @@ const TABS = [
   { id: 'technical', label: 'Chart Analysis', icon: ScanLine },
   { id: 'portfolio', label: 'Portfolio',    icon: PieChart },
   { id: 'journal',   label: 'Trade Journal', icon: ClipboardList },
-  { id: 'sprint',    label: '60-Day Sprint', icon: TrendingUp },
+  { id: 'sprint',    label: 'Swing Trade',   icon: TrendingUp },
   { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
 ] as const;
 
