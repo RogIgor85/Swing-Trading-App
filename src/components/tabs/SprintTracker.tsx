@@ -559,12 +559,12 @@ export default function SprintTracker() {
                 <div className="text-zinc-400 font-semibold mb-1.5">Per-Trade</div>
                 <ul className="space-y-1 text-zinc-400">
                   <li>• Stop loss: <span className="text-red-400 font-mono">-{settings.stop_loss_pct}%</span> from entry</li>
-                  <li>• Trail to breakeven at <span className="text-emerald-400 font-mono">+15%</span></li>
-                  <li>• Take profit: <span className="text-emerald-400 font-mono">+25–35%</span></li>
+                  <li>• Trail to breakeven at <span className="text-emerald-400 font-mono">+1R</span></li>
+                  <li>• Take profit: <span className="text-emerald-400 font-mono">2R–3R</span> (~+15–25%)</li>
                   <li>• Time stop: <span className="text-amber-400 font-mono">20 days</span> no movement</li>
                   <li>• Max <span className="text-blue-400 font-mono">4</span> open positions</li>
                   <li>• Min position: <span className="text-blue-400 font-mono">20%</span> of starting capital</li>
-                  <li>• Min target: <span className="text-emerald-400 font-mono">+25%</span> after commissions</li>
+                  <li>• Min target: <span className="text-emerald-400 font-mono">2:1 R/R</span> (2× your stop risk)</li>
                 </ul>
               </div>
 
@@ -701,8 +701,20 @@ export default function SprintTracker() {
                     <label className="label">Target Price *</label>
                     <input type="number" step="0.01" className="input-base" value={posForm.target_price} onChange={(e) => setPosForm({ ...posForm, target_price: e.target.value })} />
                     {posForm.target_price && posForm.entry_price && (() => {
-                      const pct = ((parseFloat(posForm.target_price) - parseFloat(posForm.entry_price)) / parseFloat(posForm.entry_price)) * 100;
-                      if (pct < 25) return <p className="text-amber-400 text-xs mt-0.5">⚠️ Target is only {fmt(pct, 1)}% (rule: min +25%)</p>;
+                      const ep  = parseFloat(posForm.entry_price);
+                      const sp  = parseFloat(posForm.stop_price);
+                      const tp  = parseFloat(posForm.target_price);
+                      if (!ep || !tp) return null;
+                      const tgtPct = ((tp - ep) / ep) * 100;
+                      // Use actual stop for R/R if available, else use stop_loss_pct setting
+                      const riskPct = (sp > 0 && sp < ep) ? ((ep - sp) / ep) * 100 : settings.stop_loss_pct;
+                      const rr = tgtPct / riskPct;
+                      if (rr < 2) return (
+                        <p className="text-amber-400 text-xs mt-0.5">
+                          ⚠️ Only {fmt(rr, 1)}:1 R/R ({fmt(tgtPct, 1)}%) — aim for 2:1 minimum
+                        </p>
+                      );
+                      return <p className="text-emerald-400 text-xs mt-0.5">✓ {fmt(rr, 1)}:1 R/R ({fmt(tgtPct, 1)}%)</p>;
                     })()}
                   </div>
                   <div><label className="label">Setup Type</label>
