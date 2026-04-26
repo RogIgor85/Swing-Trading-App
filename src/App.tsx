@@ -6,16 +6,18 @@ import ChartAnalysis from './components/tabs/ChartAnalysis';
 import PortfolioRisk from './components/tabs/PortfolioRisk';
 import Fundamentals from './components/tabs/Fundamentals';
 import TradeJournal from './components/tabs/TradeJournal';
+import SprintTracker from './components/tabs/SprintTracker';
 import Auth from './components/Auth';
 import { supabase } from './lib/supabase';
 import type { User } from '@supabase/supabase-js';
 
 const TABS = [
-  { id: 'scorecard', label: 'Scorecard', icon: Layers },
-  { id: 'watchlist', label: 'Watch List', icon: Eye },
+  { id: 'scorecard', label: 'Scorecard',    icon: Layers },
+  { id: 'watchlist', label: 'Watch List',   icon: Eye },
   { id: 'technical', label: 'Chart Analysis', icon: ScanLine },
-  { id: 'portfolio', label: 'Portfolio', icon: PieChart },
-  { id: 'journal', label: 'Trade Journal', icon: ClipboardList },
+  { id: 'portfolio', label: 'Portfolio',    icon: PieChart },
+  { id: 'journal',   label: 'Trade Journal', icon: ClipboardList },
+  { id: 'sprint',    label: '60-Day Sprint', icon: TrendingUp },
   { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
 ] as const;
 
@@ -112,14 +114,15 @@ export default function App() {
         </div>
       </header>
 
-      {/* Content — portfolio gets a wider container to avoid table scroll */}
-      <main className={`mx-auto px-4 py-6 ${activeTab === 'portfolio' ? 'max-w-[1600px]' : 'max-w-7xl'}`}>
+      {/* Content — portfolio & sprint get wider containers to avoid table scroll */}
+      <main className={`mx-auto px-4 py-6 ${ ['portfolio', 'sprint'].includes(activeTab) ? 'max-w-[1600px]' : 'max-w-7xl'}`}>
         {activeTab === 'scorecard' && <TriFrameScorecard />}
         {activeTab === 'watchlist' && <WatchList />}
         {activeTab === 'technical' && <ChartAnalysis />}
         {activeTab === 'portfolio' && <PortfolioRisk />}
         {activeTab === 'fundamentals' && <Fundamentals />}
         {activeTab === 'journal' && <TradeJournal />}
+        {activeTab === 'sprint' && <SprintTracker />}
       </main>
     </div>
   );
