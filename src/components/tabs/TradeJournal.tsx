@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, Trash2, TrendingUp, TrendingDown, X, Edit2, Check, ExternalLink, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, TrendingUp, TrendingDown, X, Edit2, Check, ExternalLink, RefreshCw, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine,
@@ -48,6 +48,31 @@ const TOOLTIP_STYLE = {
   itemStyle:    { color: '#ffffff' },
 };
 
+type SortKey = 'sr_no' | 'date_of_buy' | 'ticker' | 'account' | 'currency' | 'qty'
+  | 'entry_price' | 'date_of_sale' | 'avg_exit_price' | 'realized_pnl' | 'realized_pnl_pct'
+  | 'status' | 'strategy' | 'position_size';
+
+const SORT_COLS: { label: string; key: SortKey }[] = [
+  { label: '#',          key: 'sr_no'            },
+  { label: 'Date',       key: 'date_of_buy'      },
+  { label: 'Ticker',     key: 'ticker'           },
+  { label: 'Account',    key: 'account'          },
+  { label: 'Cur',        key: 'currency'         },
+  { label: 'Qty',        key: 'qty'              },
+  { label: 'Entry',      key: 'entry_price'      },
+  { label: 'Exit Date',  key: 'date_of_sale'     },
+  { label: 'Exit Price', key: 'avg_exit_price'   },
+  { label: 'P&L',        key: 'realized_pnl'     },
+  { label: 'P&L %',      key: 'realized_pnl_pct' },
+  { label: 'Result',     key: 'status'           },
+  { label: 'Strategy',   key: 'strategy'         },
+];
+
+function SortIcon({ col, sortKey, sortDir }: { col: SortKey; sortKey: SortKey; sortDir: 'asc' | 'desc' }) {
+  if (sortKey !== col) return <ChevronsUpDown size={12} className="text-zinc-500 group-hover:text-zinc-300 transition-colors" />;
+  return sortDir === 'asc' ? <ChevronUp size={12} className="text-blue-400" /> : <ChevronDown size={12} className="text-blue-400" />;
+}
+
 export default function TradeJournal() {
   const [trades, setTrades]               = useState<TradeJournalEntry[]>([]);
   const [showForm, setShowForm]           = useState(false);
@@ -60,6 +85,14 @@ export default function TradeJournal() {
 
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
   const [pricesLoading, setPricesLoading] = useState(false);
+
+  const [sortKey, setSortKey] = useState<SortKey>('date_of_buy');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+
+  function handleSort(key: SortKey) {
+    if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(key); setSortDir(key === 'date_of_buy' || key === 'date_of_sale' ? 'desc' : 'asc'); }
+  }
 
   const load = useCallback(async () => {
     const data = await storage.getAll<TradeJournalEntry>(TABLE);
@@ -230,11 +263,35 @@ export default function TradeJournal() {
   ].filter((d) => d.value > 0);
 
   const uniqueAccounts = [...new Set(trades.map((t) => t.account))];
-  const filtered = trades.filter((t) => {
-    if (filterStatus !== 'ALL' && t.status !== filterStatus) return false;
-    if (filterAccount !== 'ALL' && t.account !== filterAccount) return false;
-    return true;
-  }).sort((a, b) => b.date_of_buy.localeCompare(a.date_of_buy));
+  const filtered = trades
+    .filter((t) => {
+      if (filterStatus !== 'ALL' && t.status !== filterStatus) return false;
+      if (filterAccount !== 'ALL' && t.account !== filterAccount) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      // For P&L on open trades, derive value from live price
+      function getSortVal(t: TradeJournalEntry): string | number {
+        if (sortKey === 'realized_pnl') {
+          if (t.status === 'OPEN') return livePrices[t.ticker] != null ? (livePrices[t.ticker] - t.entry_price) * t.qty : -Infinity;
+          return t.realized_pnl ?? -Infinity;
+        }
+        if (sortKey === 'realized_pnl_pct') {
+          if (t.status === 'OPEN') return livePrices[t.ticker] != null ? ((livePrices[t.ticker] - t.entry_price) / t.entry_price) * 100 : -Infinity;
+          return (t.realized_pnl_pct ?? -Infinity);
+        }
+        if (sortKey === 'avg_exit_price') return t.avg_exit_price ?? (livePrices[t.ticker] ?? -Infinity);
+        if (sortKey === 'date_of_sale') return t.date_of_sale ?? '';
+        const v = t[sortKey as keyof TradeJournalEntry];
+        return (v ?? '') as string | number;
+      }
+      const av = getSortVal(a);
+      const bv = getSortVal(b);
+      const cmp = typeof av === 'string' && typeof bv === 'string'
+        ? av.localeCompare(bv)
+        : Number(av) - Number(bv);
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
 
   return (
     <div className="space-y-6">
@@ -471,19 +528,17 @@ export default function TradeJournal() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-zinc-800">
-                  <th className="th">#</th>
-                  <th className="th">Date</th>
-                  <th className="th">Ticker</th>
-                  <th className="th">Account</th>
-                  <th className="th">Cur</th>
-                  <th className="th">Qty</th>
-                  <th className="th">Entry</th>
-                  <th className="th">Exit Date</th>
-                  <th className="th">Exit Price</th>
-                  <th className="th">P&L</th>
-                  <th className="th">P&L %</th>
-                  <th className="th">Result</th>
-                  <th className="th">Strategy</th>
+                  {SORT_COLS.map(({ label, key }) => (
+                    <th key={key} className="th">
+                      <button
+                        onClick={() => handleSort(key)}
+                        className="group flex items-center gap-1 whitespace-nowrap text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                      >
+                        {label}
+                        <SortIcon col={key} sortKey={sortKey} sortDir={sortDir} />
+                      </button>
+                    </th>
+                  ))}
                   <th className="th" />
                 </tr>
               </thead>
