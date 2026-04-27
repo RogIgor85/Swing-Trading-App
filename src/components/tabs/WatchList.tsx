@@ -45,7 +45,8 @@ export default function WatchList() {
   const [targetEntry, setTargetEntry] = useState('');
   const [adding, setAdding] = useState(false);
   const [fetchingPrice, setFetchingPrice] = useState(false);
-  const [sortConviction, setSortConviction] = useState(true);
+  const [sortBy, setSortBy]           = useState<'conviction' | 'alpha' | 'market'>('conviction');
+  const [filterMarket, setFilterMarket] = useState<'ALL' | 'US' | 'TSX'>('ALL');
   const [drawer, setDrawer] = useState<{ ticker: string; currency: string } | null>(null);
 
   // Buy inline form
@@ -328,11 +329,26 @@ export default function WatchList() {
     await load();
   }
 
-  const sorted = sortConviction
-    ? [...items].sort((a, b) =>
-        CONVICTION_ORDER.indexOf(a.conviction) - CONVICTION_ORDER.indexOf(b.conviction)
-      )
-    : items;
+  function getMarket(ticker: string): 'TSX' | 'US' {
+    return /\.(TO|V|TSX|CN|NEO|VN)$/i.test(ticker) ? 'TSX' : 'US';
+  }
+
+  const filtered = filterMarket === 'ALL'
+    ? items
+    : items.filter((i) => getMarket(i.ticker) === filterMarket);
+
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === 'conviction')
+      return CONVICTION_ORDER.indexOf(a.conviction) - CONVICTION_ORDER.indexOf(b.conviction);
+    if (sortBy === 'alpha')
+      return a.ticker.localeCompare(b.ticker);
+    if (sortBy === 'market') {
+      const ma = getMarket(a.ticker), mb = getMarket(b.ticker);
+      if (ma !== mb) return ma === 'TSX' ? -1 : 1;
+      return a.ticker.localeCompare(b.ticker);
+    }
+    return 0;
+  });
 
   return (
     <div className="space-y-6">
@@ -429,19 +445,42 @@ export default function WatchList() {
 
       {/* Watch list */}
       <div className="card">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-semibold text-zinc-100">
-            Watching <span className="text-zinc-600 text-sm font-normal">({items.length})</span>
+        <div className="flex flex-wrap items-center gap-3 mb-4">
+          <h2 className="text-base font-semibold text-zinc-100 mr-auto">
+            Watching <span className="text-zinc-600 text-sm font-normal">({filtered.length})</span>
           </h2>
-          <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={sortConviction}
-              onChange={(e) => setSortConviction(e.target.checked)}
-              className="accent-blue-500"
-            />
-            Sort by conviction
-          </label>
+
+          {/* Market filter */}
+          <div className="flex gap-1">
+            {(['ALL', 'US', 'TSX'] as const).map((m) => (
+              <button key={m} onClick={() => setFilterMarket(m)}
+                className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                  filterMarket === m
+                    ? 'bg-blue-900/50 text-blue-300 border-blue-600'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'
+                }`}>
+                {m}
+              </button>
+            ))}
+          </div>
+
+          {/* Sort */}
+          <div className="flex gap-1">
+            {([
+              { key: 'conviction', label: 'Conviction' },
+              { key: 'alpha',      label: 'A → Z'      },
+              { key: 'market',     label: 'TSX / US'   },
+            ] as const).map(({ key, label }) => (
+              <button key={key} onClick={() => setSortBy(key)}
+                className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                  sortBy === key
+                    ? 'bg-zinc-700 text-zinc-200 border-zinc-500'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'
+                }`}>
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {sorted.length === 0 ? (
@@ -497,15 +536,24 @@ export default function WatchList() {
                     {/* Ticker & conviction */}
                     <div className="w-28 flex-shrink-0">
                       <button
-                        onClick={() => setDrawer({ ticker: item.ticker, currency: 'USD' })}
+                        onClick={() => setDrawer({ ticker: item.ticker, currency: getMarket(item.ticker) === 'TSX' ? 'CAD' : 'USD' })}
                         className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 transition-colors text-base text-left"
                         title={`View fundamentals for ${item.ticker}`}
                       >
                         {item.ticker}
                       </button>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${convictionBg[item.conviction]}`}>
-                        {item.conviction}
-                      </span>
+                      <div className="flex items-center gap-1 mt-0.5 flex-wrap">
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${convictionBg[item.conviction]}`}>
+                          {item.conviction}
+                        </span>
+                        <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${
+                          getMarket(item.ticker) === 'TSX'
+                            ? 'bg-red-900/40 text-red-300 border border-red-800'
+                            : 'bg-blue-900/40 text-blue-300 border border-blue-800'
+                        }`}>
+                          {getMarket(item.ticker)}
+                        </span>
+                      </div>
                     </div>
 
                     {/* Watch price → current price + trend */}
