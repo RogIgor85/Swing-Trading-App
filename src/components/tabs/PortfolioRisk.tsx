@@ -390,6 +390,15 @@ export default function PortfolioRisk() {
   const summaryPnLCAD   = summaryValueCAD - summaryCostCAD;
   const summaryPnLPct   = summaryCostCAD > 0 ? (summaryPnLCAD / summaryCostCAD) * 100 : 0;
 
+  // Daily change — sum of each position's intraday move in CAD
+  const dailyChangeCAD = filtered.reduce((s, h) => {
+    if (h.priceSource === 'manual' || !h.changePct) return s;
+    const delta = h.shares * h.currentPrice * (h.changePct / 100);
+    return s + toCAD(delta, h.currency);
+  }, 0);
+  const dailyChangePct = summaryValueCAD > 0 ? (dailyChangeCAD / summaryValueCAD) * 100 : 0;
+  const hasDailyData   = filtered.some((h) => h.priceSource !== 'manual' && h.changePct !== 0);
+
   // Account breakdown (all accounts, CAD)
   const accountMap: Record<string, number> = {};
   withAlloc.forEach((h) => {
@@ -518,7 +527,7 @@ export default function PortfolioRisk() {
           </div>
 
           {/* Summary bar — scoped to selected account, always CAD */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
             <div className="card py-3">
               <div className="text-xs text-zinc-500 mb-1">
                 Portfolio Value
@@ -540,6 +549,21 @@ export default function PortfolioRisk() {
               <div className={`text-xs mt-0.5 ${summaryPnLCAD >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                 {summaryPnLPct >= 0 ? '+' : ''}{summaryPnLPct.toFixed(2)}%
               </div>
+            </div>
+            <div className={`card py-3 ${!hasDailyData ? '' : dailyChangeCAD >= 0 ? 'border-emerald-900' : 'border-red-900'}`}>
+              <div className="text-xs text-zinc-500 mb-1">Today's Change</div>
+              {hasDailyData ? (
+                <>
+                  <div className={`text-xl font-bold ${dailyChangeCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {dailyChangeCAD >= 0 ? '+' : ''}{fmtCAD(dailyChangeCAD)}
+                  </div>
+                  <div className={`text-xs mt-0.5 ${dailyChangePct >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {dailyChangePct >= 0 ? '+' : ''}{dailyChangePct.toFixed(2)}%
+                  </div>
+                </>
+              ) : (
+                <div className="text-xl font-bold text-zinc-600">—</div>
+              )}
             </div>
             <div className="card py-3">
               <div className="text-xs text-zinc-500 mb-1">Holdings</div>
