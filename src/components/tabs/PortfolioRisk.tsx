@@ -391,13 +391,18 @@ export default function PortfolioRisk() {
   const summaryPnLPct   = summaryCostCAD > 0 ? (summaryPnLCAD / summaryCostCAD) * 100 : 0;
 
   // Daily change — sum of each position's intraday move in CAD
+  // prevClose = currentPrice / (1 + changePct/100)
+  // delta     = shares × (currentPrice − prevClose)
   const dailyChangeCAD = filtered.reduce((s, h) => {
     if (h.priceSource === 'manual' || !h.changePct) return s;
-    const delta = h.shares * h.currentPrice * (h.changePct / 100);
+    const prevClose = h.currentPrice / (1 + h.changePct / 100);
+    const delta     = h.shares * (h.currentPrice - prevClose);
     return s + toCAD(delta, h.currency);
   }, 0);
-  const dailyChangePct = summaryValueCAD > 0 ? (dailyChangeCAD / summaryValueCAD) * 100 : 0;
-  const hasDailyData   = filtered.some((h) => h.priceSource !== 'manual' && h.changePct !== 0);
+  // Denominator = yesterday's portfolio value = today's value − today's gain
+  const prevPortfolioCAD = summaryValueCAD - dailyChangeCAD;
+  const dailyChangePct   = prevPortfolioCAD > 0 ? (dailyChangeCAD / prevPortfolioCAD) * 100 : 0;
+  const hasDailyData     = filtered.some((h) => h.priceSource !== 'manual' && h.changePct !== 0);
 
   // Account breakdown (all accounts, CAD)
   const accountMap: Record<string, number> = {};
