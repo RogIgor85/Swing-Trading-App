@@ -68,7 +68,7 @@ const defaultForm = {
   notes: '',
 };
 
-interface LivePrice { price: number; changePct: number }
+interface LivePrice { price: number; changePct: number; prevClose: number }
 
 function loadManualPrices(): Record<string, number> {
   try { return JSON.parse(localStorage.getItem(MANUAL_PRICES_KEY) ?? '{}'); } catch { return {}; }
@@ -106,24 +106,6 @@ export default function PortfolioRisk() {
   const [sellForm, setSellForm] = useState({ exitPrice: '', qtySold: '', dateSold: new Date().toISOString().split('T')[0] });
   const [sellLoading, setSellLoading] = useState(false);
 
-  const [dailySnapshot, setDailySnapshot] = useState<DailyChangeSnapshot | null>(loadDailyChange);
-  const [editingDaily, setEditingDaily]   = useState(false);
-  const [dailyPctInput, setDailyPctInput] = useState('');
-  const [dailyCadInput, setDailyCadInput] = useState('');
-
-  function saveDailySnapshot() {
-    const pct = parseFloat(dailyPctInput);
-    const cad = parseFloat(dailyCadInput);
-    if (isNaN(pct)) return;
-    const snap: DailyChangeSnapshot = {
-      pct,
-      cad: isNaN(cad) ? 0 : cad,
-      updatedAt: new Date().toISOString(),
-    };
-    saveDailyChange(snap);
-    setDailySnapshot(snap);
-    setEditingDaily(false);
-  }
 
   type SortKey = 'ticker' | 'account' | 'currency' | 'shares' | 'avg_cost' | 'currentPrice' | 'changePct' | 'costBasis' | 'marketValue' | 'pnl' | 'allocationPct' | 'sector';
   const [sortKey, setSortKey]   = useState<SortKey | null>(null);
@@ -174,7 +156,7 @@ export default function PortfolioRisk() {
       try {
         const q = await finnhub.quote(h.ticker);
         if (q.c && q.c > 0) {
-          setLivePrices((prev) => ({ ...prev, [h.ticker]: { price: q.c, changePct: q.dp } }));
+          setLivePrices((prev) => ({ ...prev, [h.ticker]: { price: q.c, changePct: q.dp, prevClose: q.pc ?? q.c } }));
           return;
         }
       } catch { /* fall through to Yahoo */ }
@@ -185,9 +167,9 @@ export default function PortfolioRisk() {
         const y = await fetchYahoo(yahooTicker);
         const price = y.price?.regularMarketPrice ?? null;
         if (price && price > 0) {
-          const prev2 = y.price?.regularMarketPreviousClose ?? price;
-          const changePct = prev2 > 0 ? ((price - prev2) / prev2) * 100 : 0;
-          setLivePrices((prev) => ({ ...prev, [h.ticker]: { price, changePct } }));
+          const prevClose = y.price?.regularMarketPreviousClose ?? price;
+          const changePct = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
+          setLivePrices((prev) => ({ ...prev, [h.ticker]: { price, changePct, prevClose } }));
         }
       } catch { /* give up */ }
     });
@@ -423,6 +405,23 @@ export default function PortfolioRisk() {
   const summaryPnLCAD   = summaryValueCAD - summaryCostCAD;
   const summaryPnLPct   = summaryCostCAD > 0 ? (summaryPnLCAD / summaryCostCAD) * 100 : 0;
 
+  // Daily change — use actual prevClose from price feed for each position
+  const dailyChangeCAD = filtered.reduce((s, h) => {
+    const lp = livePrices[h.ticker];
+    if (!lp || h.priceSource === 'manual') return s;
+    const pc = lp.prevClose > 0 ? lp.prevClose : lp.price;
+    return s + toCAD(h.shares * (lp.price - pc), h.currency);
+  }, 0);
+  // Yesterday's portfolio value = sum of (shares × prevClose) for live positions + cost basis for the rest
+  const prevPortfolioCAD = filtered.reduce((s, h) => {
+    const lp = livePrices[h.ticker];
+    if (!lp || h.priceSource === 'manual') return s + toCAD(h.costBasis, h.currency);
+    const pc = lp.prevClose > 0 ? lp.prevClose : lp.price;
+    return s + toCAD(h.shares * pc, h.currency);
+  }, 0);
+  const dailyChangePct = prevPortfolioCAD > 0 ? (dailyChangeCAD / prevPortfolioCAD) * 100 : 0;
+  const hasDailyData   = filtered.some((h) => livePrices[h.ticker] && h.priceSource !== 'manual');
+
 
   // Account breakdown (all accounts, CAD)
   const accountMap: Record<string, number> = {};
@@ -575,67 +574,21 @@ export default function PortfolioRisk() {
                 {summaryPnLPct >= 0 ? '+' : ''}{summaryPnLPct.toFixed(2)}%
               </div>
             </div>
-            <div className={`card py-3 ${dailySnapshot ? (dailySnapshot.pct >= 0 ? 'border-emerald-900' : 'border-red-900') : ''}`}>
-              <div className="flex items-center justify-between mb-1">
-                <div className="text-xs text-zinc-500">Today's Change</div>
-                <button
-                  onClick={() => {
-                    setDailyPctInput(dailySnapshot?.pct.toString() ?? '');
-                    setDailyCadInput(dailySnapshot?.cad.toString() ?? '');
-                    setEditingDaily(true);
-                  }}
-                  className="text-zinc-600 hover:text-zinc-300 transition-colors"
-                  title="Update today's change"
-                >
-                  <Pencil size={11} />
-                </button>
-              </div>
-
-              {editingDaily ? (
-                <div className="space-y-1.5 mt-1">
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="number" step="0.01" placeholder="% e.g. -1.2"
-                      value={dailyPctInput}
-                      onChange={(e) => setDailyPctInput(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') saveDailySnapshot(); if (e.key === 'Escape') setEditingDaily(false); }}
-                      className="w-24 bg-zinc-700 border border-blue-500 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none"
-                      autoFocus
-                    />
-                    <span className="text-zinc-600 text-xs">%</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="number" step="0.01" placeholder="$ CAD (opt)"
-                      value={dailyCadInput}
-                      onChange={(e) => setDailyCadInput(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') saveDailySnapshot(); if (e.key === 'Escape') setEditingDaily(false); }}
-                      className="w-24 bg-zinc-700 border border-zinc-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none"
-                    />
-                    <span className="text-zinc-600 text-xs">CAD</span>
-                  </div>
-                  <div className="flex gap-1">
-                    <button onClick={saveDailySnapshot} className="text-emerald-400 hover:text-emerald-300 p-0.5"><Check size={12} /></button>
-                    <button onClick={() => setEditingDaily(false)} className="text-zinc-500 hover:text-zinc-300 p-0.5"><X size={12} /></button>
-                  </div>
-                </div>
-              ) : dailySnapshot ? (
+            <div className={`card py-3 ${!hasDailyData ? '' : dailyChangeCAD >= 0 ? 'border-emerald-900' : 'border-red-900'}`}>
+              <div className="text-xs text-zinc-500 mb-1">Today's Change</div>
+              {hasDailyData ? (
                 <>
-                  <div className={`text-xl font-bold ${dailySnapshot.pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {dailySnapshot.pct >= 0 ? '+' : ''}{dailySnapshot.pct.toFixed(2)}%
+                  <div className={`text-xl font-bold ${dailyChangeCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {dailyChangePct >= 0 ? '+' : ''}{dailyChangePct.toFixed(2)}%
                   </div>
-                  {dailySnapshot.cad !== 0 && (
-                    <div className={`text-xs tabular-nums mt-0.5 ${dailySnapshot.cad >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                      {dailySnapshot.cad >= 0 ? '+' : ''}{fmtCAD(dailySnapshot.cad)}
-                    </div>
-                  )}
-                  <div className="text-xs text-zinc-700 mt-1">
-                    EOD {new Date(dailySnapshot.updatedAt).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                  <div className={`text-xs tabular-nums mt-0.5 ${dailyChangeCAD >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {dailyChangeCAD >= 0 ? '+' : ''}{fmtCAD(dailyChangeCAD)}
                   </div>
                 </>
               ) : (
-                <div className="text-sm text-zinc-600 mt-1">Click ✏️ to update</div>
+                <div className="text-xl font-bold text-zinc-600">—</div>
               )}
+              <div className="text-xs text-zinc-700 mt-1">vs. prev close</div>
             </div>
             <div className="card py-3">
               <div className="text-xs text-zinc-500 mb-1">Holdings</div>
