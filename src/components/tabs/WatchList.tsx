@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, Trash2, RefreshCw, TrendingUp, TrendingDown, Minus, ShoppingCart, X, Check } from 'lucide-react';
+import { Plus, Trash2, RefreshCw, TrendingUp, TrendingDown, Minus, ShoppingCart, X, Check, Edit2 } from 'lucide-react';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
@@ -56,6 +56,55 @@ export default function WatchList() {
   const [buyCurrency, setBuyCurrency] = useState('USD');
   const [buyLoading, setBuyLoading] = useState(false);
   const [buyError, setBuyError]   = useState<string | null>(null);
+  const [buyDest, setBuyDest]     = useState<'portfolio' | 'swing'>('portfolio');
+  const [buyStop, setBuyStop]     = useState('');
+  const [buyTarget, setBuyTarget] = useState('');
+  const [buySetup, setBuySetup]   = useState('Breakout');
+
+  // Edit inline form
+  const [editId, setEditId]   = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({
+    watch_price: '', target_entry: '', analyst_target: '', conviction: 'MEDIUM' as Conviction, notes: '',
+  });
+
+  function openEdit(item: WatchItem) {
+    setEditId(item.id);
+    setEditForm({
+      watch_price:     item.watch_price?.toString()    ?? '',
+      target_entry:    item.target_entry?.toString()   ?? '',
+      analyst_target:  item.analyst_target?.toString() ?? '',
+      conviction:      item.conviction,
+      notes:           item.notes ?? '',
+    });
+  }
+
+  async function saveEdit(id: string) {
+    await storage.update(TABLE, id, {
+      watch_price:    editForm.watch_price    ? parseFloat(editForm.watch_price)    : null,
+      target_entry:   editForm.target_entry   ? parseFloat(editForm.target_entry)   : null,
+      analyst_target: editForm.analyst_target ? parseFloat(editForm.analyst_target) : null,
+      conviction:     editForm.conviction,
+      notes:          editForm.notes,
+    });
+    setEditId(null);
+    await load();
+  }
+
+  // Helpers for writing to Swing Trade (localStorage sprint_positions)
+  function sGet<T>(key: string, def: T): T {
+    try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : def; } catch { return def; }
+  }
+  function sSet(key: string, val: unknown) {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch { }
+  }
+  function currentSprintWeek(): number {
+    try {
+      const s = sGet<{ sprint_start_date?: string }>('sprint_settings', {});
+      if (!s.sprint_start_date) return 1;
+      const diff = Date.now() - new Date(s.sprint_start_date).getTime();
+      return Math.max(1, Math.ceil(diff / (7 * 24 * 3600 * 1000)));
+    } catch { return 1; }
+  }
 
   const load = useCallback(async () => {
     const data = await storage.getAll<WatchItem>(TABLE);
@@ -194,42 +243,71 @@ export default function WatchList() {
     const isCAD = item.ticker.includes('.TO') || item.ticker.includes('.V') || item.ticker.includes('.CN');
     setBuyCurrency(isCAD ? 'CAD' : 'USD');
     setBuyAccount('Brokerage');
+    setBuyDest('portfolio');
+    setBuyStop('');
+    setBuyTarget(item.analyst_target?.toFixed(2) ?? '');
+    setBuySetup('Breakout');
   }
 
   async function handleBuy(item: WatchItem) {
     const shares = parseFloat(buyShares);
     const cost   = parseFloat(buyPrice);
     if (!shares || !cost || shares <= 0 || cost <= 0) return;
+    if (buyDest === 'swing' && (!buyStop || !buyTarget)) {
+      setBuyError('Stop price and target price are required for Swing Trade.');
+      return;
+    }
     setBuyLoading(true);
     setBuyError(null);
     try {
-      // Check for existing holding to merge
-      const existing = (await storage.getAll<{
-        id: string; ticker: string; account: string; currency: string; shares: number; avg_cost: number;
-      }>(HOLDINGS_TABLE)).find(
-        (h) => h.ticker === item.ticker && h.account === buyAccount && h.currency === buyCurrency
-      );
-
-      if (existing) {
-        const totalShares = existing.shares + shares;
-        const newAvgCost  = (existing.shares * existing.avg_cost + shares * cost) / totalShares;
-        await storage.update(HOLDINGS_TABLE, existing.id, {
-          shares: totalShares,
-          avg_cost: parseFloat(newAvgCost.toFixed(6)),
-        });
-      } else {
-        await storage.insert(HOLDINGS_TABLE, {
-          id: newId(),
-          ticker: item.ticker,
+      if (buyDest === 'swing') {
+        // Write to Swing Trade localStorage
+        const stop   = parseFloat(buyStop);
+        const target = parseFloat(buyTarget);
+        const existing: any[] = sGet('sprint_positions', []);
+        const pos = {
+          id:                newId(),
+          ticker:            item.ticker,
+          entry_date:        new Date().toISOString().split('T')[0],
+          entry_price:       cost,
           shares,
-          avg_cost: cost,
-          sector: 'Other',
-          account: buyAccount,
-          currency: buyCurrency,
-          liquidity_risk: 'LOW',
-          notes: item.notes ?? '',
-          created_at: nowIso(),
-        });
+          position_size_usd: cost * shares,
+          stop_price:        stop,
+          target_price:      target,
+          setup_type:        buySetup,
+          week_number:       currentSprintWeek(),
+          notes:             item.notes ?? '',
+          created_at:        nowIso(),
+        };
+        sSet('sprint_positions', [...existing, pos]);
+      } else {
+        // Write to Portfolio (holdings table)
+        const existing = (await storage.getAll<{
+          id: string; ticker: string; account: string; currency: string; shares: number; avg_cost: number;
+        }>(HOLDINGS_TABLE)).find(
+          (h) => h.ticker === item.ticker && h.account === buyAccount && h.currency === buyCurrency
+        );
+        if (existing) {
+          const totalShares = existing.shares + shares;
+          const newAvgCost  = (existing.shares * existing.avg_cost + shares * cost) / totalShares;
+          await storage.update(HOLDINGS_TABLE, existing.id, {
+            shares: totalShares,
+            avg_cost: parseFloat(newAvgCost.toFixed(6)),
+          });
+        } else {
+          await storage.insert(HOLDINGS_TABLE, {
+            id: newId(),
+            ticker: item.ticker,
+            shares,
+            avg_cost: cost,
+            sector: 'Other',
+            account: buyAccount,
+            currency: buyCurrency,
+            liquidity_risk: 'LOW',
+            notes: item.notes ?? '',
+            created_at: nowIso(),
+          });
+        }
       }
 
       // Remove from watchlist
@@ -238,7 +316,7 @@ export default function WatchList() {
       setBuyId(null);
       await load();
     } catch (err) {
-      setBuyError(err instanceof Error ? err.message : 'Failed to add to portfolio. Please try again.');
+      setBuyError(err instanceof Error ? err.message : 'Failed. Please try again.');
     } finally {
       setBuyLoading(false);
     }
@@ -572,13 +650,20 @@ export default function WatchList() {
                         <RefreshCw size={13} className={ld?.loading ? 'animate-spin' : ''} />
                       </button>
                       <button
+                        onClick={() => { setEditId(editId === item.id ? null : null); openEdit(item); }}
+                        className={`btn-ghost p-1.5 ${editId === item.id ? 'text-blue-400' : ''}`}
+                        title="Edit"
+                      >
+                        <Edit2 size={13} />
+                      </button>
+                      <button
                         onClick={() => isBuying ? setBuyId(null) : openBuyForm(item)}
                         className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${
                           isBuying
                             ? 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
                             : 'bg-emerald-700 hover:bg-emerald-600 text-white'
                         }`}
-                        title="Buy — move to portfolio"
+                        title="Buy"
                       >
                         {isBuying ? <X size={12} /> : <ShoppingCart size={12} />}
                         {isBuying ? 'Cancel' : 'Buy'}
@@ -589,63 +674,136 @@ export default function WatchList() {
                     </div>
                   </div>
 
-                  {/* Inline buy form */}
-                  {isBuying && (
+                  {/* Inline edit form */}
+                  {editId === item.id && (
                     <div className="mt-3 pt-3 border-t border-zinc-700/50 flex flex-wrap gap-3 items-end">
                       <div>
-                        <label className="label">Shares *</label>
-                        <input
-                          className="input-base w-24"
-                          type="number"
-                          step="0.0001"
-                          min="0.0001"
-                          placeholder="100"
-                          value={buyShares}
-                          onChange={(e) => setBuyShares(e.target.value)}
-                          autoFocus
-                        />
+                        <label className="label">Watch Price</label>
+                        <input className="input-base w-28" type="number" step="0.01" value={editForm.watch_price}
+                          onChange={(e) => setEditForm({ ...editForm, watch_price: e.target.value })} autoFocus />
                       </div>
                       <div>
-                        <label className="label">Avg Cost *</label>
-                        <input
-                          className="input-base w-28"
-                          type="number"
-                          step="0.01"
-                          min="0.01"
-                          placeholder="0.00"
-                          value={buyPrice}
-                          onChange={(e) => setBuyPrice(e.target.value)}
-                        />
+                        <label className="label">Target Entry</label>
+                        <input className="input-base w-28" type="number" step="0.01" value={editForm.target_entry}
+                          onChange={(e) => setEditForm({ ...editForm, target_entry: e.target.value })} />
                       </div>
                       <div>
-                        <label className="label">Account</label>
-                        <select className="select-base w-28" value={buyAccount} onChange={(e) => setBuyAccount(e.target.value)}>
-                          {['Brokerage', 'RRSP', 'LIRA', 'TSFA', 'HSA', 'Other'].map((a) => (
-                            <option key={a} value={a}>{a}</option>
-                          ))}
+                        <label className="label">Analyst Target</label>
+                        <input className="input-base w-28" type="number" step="0.01" value={editForm.analyst_target}
+                          onChange={(e) => setEditForm({ ...editForm, analyst_target: e.target.value })} />
+                      </div>
+                      <div>
+                        <label className="label">Conviction</label>
+                        <select className="select-base w-28" value={editForm.conviction}
+                          onChange={(e) => setEditForm({ ...editForm, conviction: e.target.value as Conviction })}>
+                          {CONVICTION_ORDER.map((c) => <option key={c}>{c}</option>)}
                         </select>
                       </div>
-                      <div>
-                        <label className="label">Currency</label>
-                        <select className="select-base w-24" value={buyCurrency} onChange={(e) => setBuyCurrency(e.target.value)}>
-                          <option>USD</option>
-                          <option>CAD</option>
-                        </select>
+                      <div className="flex-1 min-w-40">
+                        <label className="label">Notes</label>
+                        <input className="input-base" value={editForm.notes}
+                          onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })} />
                       </div>
-                      <button
-                        onClick={() => handleBuy(item)}
-                        disabled={buyLoading || !buyShares || !buyPrice}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded transition-colors"
-                      >
-                        <Check size={13} />
-                        {buyLoading ? 'Adding…' : 'Confirm Buy'}
-                      </button>
-                      <p className="text-xs text-zinc-600 w-full mt-1">
-                        This will add {item.ticker} to your Portfolio and remove it from the Watch List.
+                      <div className="flex gap-2">
+                        <button onClick={() => saveEdit(item.id)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded transition-colors">
+                          <Check size={13} /> Save
+                        </button>
+                        <button onClick={() => setEditId(null)} className="btn-ghost text-xs px-3 py-1.5">
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Inline buy form */}
+                  {isBuying && (
+                    <div className="mt-3 pt-3 border-t border-zinc-700/50 space-y-3">
+                      {/* Destination toggle */}
+                      <div className="flex gap-2">
+                        <span className="text-xs text-zinc-500 self-center mr-1">Send to:</span>
+                        {(['portfolio', 'swing'] as const).map((d) => (
+                          <button key={d} onClick={() => setBuyDest(d)}
+                            className={`text-xs px-3 py-1 rounded-full border font-medium transition-colors ${
+                              buyDest === d
+                                ? 'bg-blue-900/50 text-blue-300 border-blue-600'
+                                : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'
+                            }`}>
+                            {d === 'portfolio' ? '📊 Portfolio' : '⚡ Swing Trade'}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex flex-wrap gap-3 items-end">
+                        <div>
+                          <label className="label">Shares *</label>
+                          <input className="input-base w-24" type="number" step="0.0001" min="0.0001"
+                            placeholder="100" value={buyShares} onChange={(e) => setBuyShares(e.target.value)} autoFocus />
+                        </div>
+                        <div>
+                          <label className="label">Entry Price *</label>
+                          <input className="input-base w-28" type="number" step="0.01" min="0.01"
+                            placeholder="0.00" value={buyPrice} onChange={(e) => setBuyPrice(e.target.value)} />
+                        </div>
+
+                        {buyDest === 'portfolio' && (
+                          <>
+                            <div>
+                              <label className="label">Account</label>
+                              <select className="select-base w-28" value={buyAccount} onChange={(e) => setBuyAccount(e.target.value)}>
+                                {['Brokerage', 'RRSP', 'LIRA', 'TSFA', 'HSA', 'Other'].map((a) => (
+                                  <option key={a}>{a}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="label">Currency</label>
+                              <select className="select-base w-24" value={buyCurrency} onChange={(e) => setBuyCurrency(e.target.value)}>
+                                <option>USD</option><option>CAD</option>
+                              </select>
+                            </div>
+                          </>
+                        )}
+
+                        {buyDest === 'swing' && (
+                          <>
+                            <div>
+                              <label className="label">Stop Price *</label>
+                              <input className="input-base w-28" type="number" step="0.01"
+                                placeholder="0.00" value={buyStop} onChange={(e) => setBuyStop(e.target.value)} />
+                            </div>
+                            <div>
+                              <label className="label">Target Price *</label>
+                              <input className="input-base w-28" type="number" step="0.01"
+                                placeholder="0.00" value={buyTarget} onChange={(e) => setBuyTarget(e.target.value)} />
+                            </div>
+                            <div>
+                              <label className="label">Setup</label>
+                              <select className="select-base w-32" value={buySetup} onChange={(e) => setBuySetup(e.target.value)}>
+                                {['Breakout', 'Pullback', 'Reversal', 'Momentum', 'Other'].map((s) => (
+                                  <option key={s}>{s}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </>
+                        )}
+
+                        <button
+                          onClick={() => handleBuy(item)}
+                          disabled={buyLoading || !buyShares || !buyPrice}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded transition-colors"
+                        >
+                          <Check size={13} />
+                          {buyLoading ? 'Adding…' : buyDest === 'swing' ? 'Add to Swing Trade' : 'Add to Portfolio'}
+                        </button>
+                      </div>
+                      <p className="text-xs text-zinc-600">
+                        {buyDest === 'swing'
+                          ? `${item.ticker} will be added to your Swing Trade open positions.`
+                          : `${item.ticker} will be added to your Portfolio.`}
+                        {' '}It will be removed from the Watch List.
                       </p>
-                      {buyError && (
-                        <p className="text-xs text-red-400 w-full">{buyError}</p>
-                      )}
+                      {buyError && <p className="text-xs text-red-400">{buyError}</p>}
                     </div>
                   )}
                 </div>
