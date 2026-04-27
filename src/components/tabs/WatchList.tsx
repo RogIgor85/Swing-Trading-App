@@ -635,10 +635,6 @@ export default function WatchList() {
                       </div>
                     )}
 
-                    {/* Notes */}
-                    {item.notes && (
-                      <div className="flex-1 text-xs text-zinc-500 truncate hidden lg:block">{item.notes}</div>
-                    )}
 
                     {/* Actions */}
                     <div className="flex items-center gap-2 ml-auto flex-shrink-0">
@@ -673,6 +669,13 @@ export default function WatchList() {
                       </button>
                     </div>
                   </div>
+
+                  {/* Notes — full width row */}
+                  {item.notes && (
+                    <div className="mt-2 pt-2 border-t border-zinc-700/40 text-xs text-zinc-400 leading-relaxed">
+                      <span className="text-zinc-600 mr-1">📝</span>{item.notes}
+                    </div>
+                  )}
 
                   {/* Inline edit form */}
                   {editId === item.id && (
