@@ -11,11 +11,11 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.104.1",
     "clsx": "^2.1.0",
+    "exceljs": "^4.4.0",
     "lucide-react": "^0.344.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "recharts": "^2.10.0",
-    "xlsx": "^0.18.5",
     "yahoo-finance2": "^3.14.0"
   },
   "devDependencies": {

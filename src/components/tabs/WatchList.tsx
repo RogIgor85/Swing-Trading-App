@@ -22,9 +22,9 @@ interface LiveData {
 const CONVICTION_ORDER: Conviction[] = ['HIGH', 'MEDIUM', 'LOW'];
 
 const convictionBg: Record<Conviction, string> = {
-  HIGH: 'bg-emerald-900/40 text-emerald-300 border border-emerald-700',
+  HIGH:   'bg-emerald-900/40 text-emerald-300 border border-emerald-700',
   MEDIUM: 'bg-amber-900/40 text-amber-300 border border-amber-700',
-  LOW: 'bg-zinc-800 text-zinc-400 border border-zinc-700',
+  LOW:    'bg-red-900/40 text-red-300 border border-red-700',
 };
 
 function daysSince(dateStr: string): number {
