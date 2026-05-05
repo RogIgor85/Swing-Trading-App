@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { TrendingUp, Eye, ScanLine, PieChart, BookOpen, ClipboardList, Layers, LogOut } from 'lucide-react';
+import { TrendingUp, Eye, ScanLine, PieChart, BookOpen, ClipboardList, Layers, LogOut, Wallet } from 'lucide-react';
 import TriFrameScorecard from './components/tabs/TriFrameScorecard';
 import WatchList from './components/tabs/WatchList';
 import ChartAnalysis from './components/tabs/ChartAnalysis';
@@ -7,6 +7,7 @@ import PortfolioRisk from './components/tabs/PortfolioRisk';
 import Fundamentals from './components/tabs/Fundamentals';
 import TradeJournal from './components/tabs/TradeJournal';
 import SprintTracker from './components/tabs/SprintTracker';
+import NetWorth from './components/tabs/NetWorth';
 import Auth from './components/Auth';
 import { supabase } from './lib/supabase';
 import type { User } from '@supabase/supabase-js';
@@ -18,6 +19,7 @@ const TABS = [
   { id: 'portfolio', label: 'Portfolio',    icon: PieChart },
   { id: 'journal',   label: 'Trade Journal', icon: ClipboardList },
   { id: 'sprint',    label: 'Swing Trade',   icon: TrendingUp },
+  { id: 'networth',     label: 'Net Worth',    icon: Wallet },
   { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
 ] as const;
 
@@ -123,6 +125,7 @@ export default function App() {
         {activeTab === 'fundamentals' && <Fundamentals />}
         {activeTab === 'journal' && <TradeJournal />}
         {activeTab === 'sprint' && <SprintTracker />}
+        {activeTab === 'networth' && <NetWorth />}
       </main>
     </div>
   );
