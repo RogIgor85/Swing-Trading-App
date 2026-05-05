@@ -33,30 +33,11 @@ interface Store {
 interface PortfolioAccount { account: string; description: string; valueCAD: number }
 
 const DEFAULT: Store = {
-  realProperty: [
-    { id: uid(), category: 'Primary Residence',   description: '6911 106st, Edmonton AB',    value: 650000, debt: 500000 },
-    { id: uid(), category: 'Other Real Property',  description: 'e.g. Rental / Cabin / Land', value: 0,      debt: 0 },
-  ],
-  vehicles: [
-    { id: uid(), category: 'Vehicle 1', description: '2019 Ford Ranger FX4',          value: 35000, debt: 9000 },
-    { id: uid(), category: 'Vehicle 2', description: '2013 Victory Highball',          value: 12000, debt: 0 },
-    { id: uid(), category: 'Vehicle 3', description: '2021 Honda Rebel',               value: 15000, debt: 0 },
-    { id: uid(), category: 'Vehicle 4', description: '2020 Harley Davidson Livewire',  value: 15000, debt: 0 },
-  ],
-  bankAccounts: [
-    { id: uid(), category: 'Chequing Account', description: 'Primary chequing',          value: 6500,  debt: 0 },
-    { id: uid(), category: 'Savings Account',  description: 'Savings / Emergency Fund',  value: 18250, debt: 0 },
-  ],
-  otherAssets: [
-    { id: uid(), category: 'Personal Property',  description: 'Tools, equipment, electronics, etc.', value: 50000, debt: 0 },
-    { id: uid(), category: 'Business Interests', description: 'Any ownership / partnership stake',   value: 0,     debt: 0 },
-    { id: uid(), category: 'Other',              description: '',                                     value: 0,     debt: 0 },
-  ],
-  liabilities: [
-    { id: uid(), category: 'Credit Cards',            description: 'Total outstanding balance', value: 0, debt: 8600 },
-    { id: uid(), category: 'Vehicle Loan',            description: 'If applicable',             value: 0, debt: 0 },
-    { id: uid(), category: 'Line of Credit / Other',  description: '',                          value: 0, debt: 0 },
-  ],
+  realProperty: [],
+  vehicles:     [],
+  bankAccounts: [],
+  otherAssets:  [],
+  liabilities:  [],
 };
 
 const ACCOUNT_DESCRIPTIONS: Record<string, string> = {
