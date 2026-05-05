@@ -100,9 +100,15 @@ export default function NetWorth() {
     setSyncing(true);
     try {
       const holdings = await storage.getAll<Holding>('holdings');
+      // Use manually-set prices from Portfolio tab when available (most up-to-date)
+      const manualPrices: Record<string, number> = (() => {
+        try { return JSON.parse(localStorage.getItem('swing_manual_prices') ?? '{}'); } catch { return {}; }
+      })();
+
       const map: Record<string, number> = {};
       holdings.forEach(h => {
-        const valueCAD = h.shares * h.avg_cost * (h.currency === 'USD' ? usdCadRate : 1);
+        const price    = manualPrices[h.ticker] ?? h.avg_cost;
+        const valueCAD = h.shares * price * (h.currency === 'USD' ? usdCadRate : 1);
         map[h.account] = (map[h.account] ?? 0) + valueCAD;
       });
       const accounts: PortfolioAccount[] = Object.entries(map)
