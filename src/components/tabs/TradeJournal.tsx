@@ -39,6 +39,7 @@ const accountColors: Record<Account, string> = {
   LIRA:      'text-purple-400',
   TSFA:      'text-amber-400',
   HSA:       'text-cyan-400',
+  Crypto:    'text-orange-400',
   Other:     'text-zinc-400',
 };
 

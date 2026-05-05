@@ -2,7 +2,7 @@ export type Verdict = 'GO' | 'CONDITIONAL' | 'NO GO';
 export type Conviction = 'HIGH' | 'MEDIUM' | 'LOW';
 export type TrendDirection = 'BULLISH' | 'BEARISH' | 'NEUTRAL';
 export type LiquidityRisk = 'LOW' | 'MEDIUM' | 'HIGH';
-export type Account = 'Brokerage' | 'RRSP' | 'LIRA' | 'TSFA' | 'HSA' | 'Other';
+export type Account = 'Brokerage' | 'RRSP' | 'LIRA' | 'TSFA' | 'HSA' | 'Crypto' | 'Other';
 export type Currency = 'USD' | 'CAD';
 
 export interface ScorecardEntry {

@@ -1,5 +1,7 @@
-import { useState } from 'react';
-import { Plus, Trash2, Check, X, Pencil } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Plus, Trash2, Check, X, Pencil, RefreshCw } from 'lucide-react';
+import { storage } from '../../lib/storage';
+import type { Holding } from '../../types';
 
 const STORAGE_KEY = 'swing_networth_v1';
 
@@ -23,16 +25,17 @@ type SectionKey = 'realProperty' | 'vehicles' | 'investments' | 'bankAccounts' |
 interface Store {
   realProperty: Row[];
   vehicles:     Row[];
-  investments:  Row[];
   bankAccounts: Row[];
   otherAssets:  Row[];
   liabilities:  Row[];
 }
 
+interface PortfolioAccount { account: string; description: string; valueCAD: number }
+
 const DEFAULT: Store = {
   realProperty: [
-    { id: uid(), category: 'Primary Residence',   description: '6911 106st, Edmonton AB',              value: 650000, debt: 500000 },
-    { id: uid(), category: 'Other Real Property',  description: 'e.g. Rental / Cabin / Land',           value: 0,      debt: 0 },
+    { id: uid(), category: 'Primary Residence',   description: '6911 106st, Edmonton AB',    value: 650000, debt: 500000 },
+    { id: uid(), category: 'Other Real Property',  description: 'e.g. Rental / Cabin / Land', value: 0,      debt: 0 },
   ],
   vehicles: [
     { id: uid(), category: 'Vehicle 1', description: '2019 Ford Ranger FX4',          value: 35000, debt: 9000 },
@@ -40,27 +43,30 @@ const DEFAULT: Store = {
     { id: uid(), category: 'Vehicle 3', description: '2021 Honda Rebel',               value: 15000, debt: 0 },
     { id: uid(), category: 'Vehicle 4', description: '2020 Harley Davidson Livewire',  value: 15000, debt: 0 },
   ],
-  investments: [
-    { id: uid(), category: 'TFSA',           description: 'Tax-Free Savings Account',            value: 130615, debt: 0 },
-    { id: uid(), category: 'RRSP',           description: 'Registered Retirement Savings Plan',  value: 179226, debt: 0 },
-    { id: uid(), category: 'LIRA',           description: 'Locked-In Retirement Account',        value: 130000, debt: 0 },
-    { id: uid(), category: 'Brokerage',      description: 'Investment Account',                  value: 13000,  debt: 0 },
-    { id: uid(), category: 'Crypto / Other', description: 'Crypto, options, other instruments',  value: 0,      debt: 0 },
-  ],
   bankAccounts: [
     { id: uid(), category: 'Chequing Account', description: 'Primary chequing',          value: 6500,  debt: 0 },
     { id: uid(), category: 'Savings Account',  description: 'Savings / Emergency Fund',  value: 18250, debt: 0 },
   ],
   otherAssets: [
-    { id: uid(), category: 'Personal Property',     description: 'Tools, equipment, electronics, etc.', value: 50000, debt: 0 },
-    { id: uid(), category: 'Business Interests',    description: 'Any ownership / partnership stake',   value: 0,     debt: 0 },
-    { id: uid(), category: 'Other',                 description: '',                                     value: 0,     debt: 0 },
+    { id: uid(), category: 'Personal Property',  description: 'Tools, equipment, electronics, etc.', value: 50000, debt: 0 },
+    { id: uid(), category: 'Business Interests', description: 'Any ownership / partnership stake',   value: 0,     debt: 0 },
+    { id: uid(), category: 'Other',              description: '',                                     value: 0,     debt: 0 },
   ],
   liabilities: [
     { id: uid(), category: 'Credit Cards',            description: 'Total outstanding balance', value: 0, debt: 8600 },
-    { id: uid(), category: 'Vehicle Loan',             description: 'If applicable',             value: 0, debt: 0 },
-    { id: uid(), category: 'Line of Credit / Other',   description: '',                          value: 0, debt: 0 },
+    { id: uid(), category: 'Vehicle Loan',            description: 'If applicable',             value: 0, debt: 0 },
+    { id: uid(), category: 'Line of Credit / Other',  description: '',                          value: 0, debt: 0 },
   ],
+};
+
+const ACCOUNT_DESCRIPTIONS: Record<string, string> = {
+  RRSP:      'Registered Retirement Savings Plan',
+  TSFA:      'Tax-Free Savings Account',
+  LIRA:      'Locked-In Retirement Account',
+  Brokerage: 'Investment Account',
+  HSA:       'Health Savings Account',
+  Crypto:    'Crypto & Digital Assets',
+  Other:     'Other Investments',
 };
 
 function loadStore(): Store {
@@ -80,12 +86,40 @@ const SECTIONS: { key: SectionKey; label: string; num: number }[] = [
   { key: 'liabilities',   label: 'Liabilities',     num: 6 },
 ];
 
-const ASSET_SECTIONS: SectionKey[] = ['realProperty', 'vehicles', 'investments', 'bankAccounts', 'otherAssets'];
+const MANUAL_ASSET_SECTIONS: SectionKey[] = ['realProperty', 'vehicles', 'bankAccounts', 'otherAssets'];
 
 export default function NetWorth() {
-  const [store, setStore]     = useState<Store>(loadStore);
-  const [editId, setEditId]   = useState<string | null>(null);
+  const [store, setStore]       = useState<Store>(loadStore);
+  const [editId, setEditId]     = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Partial<Row>>({});
+  const [portfolioAccounts, setPortfolioAccounts] = useState<PortfolioAccount[]>([]);
+  const [usdCadRate, setUsdCadRate] = useState(1.38);
+  const [syncing, setSyncing]   = useState(false);
+
+  async function syncPortfolio() {
+    setSyncing(true);
+    try {
+      const holdings = await storage.getAll<Holding>('holdings');
+      const map: Record<string, number> = {};
+      holdings.forEach(h => {
+        const valueCAD = h.shares * h.avg_cost * (h.currency === 'USD' ? usdCadRate : 1);
+        map[h.account] = (map[h.account] ?? 0) + valueCAD;
+      });
+      const accounts: PortfolioAccount[] = Object.entries(map)
+        .filter(([, v]) => v > 0)
+        .map(([account, valueCAD]) => ({
+          account,
+          description: ACCOUNT_DESCRIPTIONS[account] ?? account,
+          valueCAD,
+        }))
+        .sort((a, b) => b.valueCAD - a.valueCAD);
+      setPortfolioAccounts(accounts);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  useEffect(() => { syncPortfolio(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function mutate(section: SectionKey, rows: Row[]) {
     const next = { ...store, [section]: rows };
@@ -97,7 +131,7 @@ export default function NetWorth() {
   function cancelEdit() { setEditId(null); setEditForm({}); }
 
   function commitEdit(section: SectionKey) {
-    mutate(section, store[section].map(r =>
+    mutate(section, (store[section as keyof Store] as Row[]).map(r =>
       r.id === editId
         ? { ...r, ...editForm, value: Number(editForm.value ?? 0), debt: Number(editForm.debt ?? 0) }
         : r
@@ -106,21 +140,23 @@ export default function NetWorth() {
   }
 
   function addRow(section: SectionKey) {
-    mutate(section, [...store[section], { id: uid(), category: '', description: '', value: 0, debt: 0 }]);
+    mutate(section, [...(store[section as keyof Store] as Row[]), { id: uid(), category: '', description: '', value: 0, debt: 0 }]);
   }
 
   function deleteRow(section: SectionKey, id: string) {
     if (!window.confirm('Delete this row?')) return;
-    mutate(section, store[section].filter(r => r.id !== id));
+    mutate(section, (store[section as keyof Store] as Row[]).filter(r => r.id !== id));
   }
 
-  // Totals
-  const totalAssets = ASSET_SECTIONS.flatMap(s => store[s]).reduce((s, r) => s + r.value, 0);
-  const totalDebt   = [...ASSET_SECTIONS, 'liabilities' as SectionKey].flatMap(s => store[s]).reduce((s, r) => s + r.debt, 0);
+  // Totals — investments come from portfolio sync, rest from manual store
+  const investmentTotal = portfolioAccounts.reduce((s, a) => s + a.valueCAD, 0);
+  const totalAssets = MANUAL_ASSET_SECTIONS.flatMap(s => (store[s as keyof Store] as Row[])).reduce((s, r) => s + r.value, 0) + investmentTotal;
+  const totalDebt   = [...MANUAL_ASSET_SECTIONS, 'liabilities' as SectionKey].flatMap(s => (store[s as keyof Store] as Row[])).reduce((s, r) => s + r.debt, 0);
   const netWorth    = totalAssets - totalDebt;
 
   function sub(section: SectionKey) {
-    const rows = store[section];
+    if (section === 'investments') return { value: investmentTotal, debt: 0 };
+    const rows = store[section as keyof Store] as Row[];
     return { value: rows.reduce((s, r) => s + r.value, 0), debt: rows.reduce((s, r) => s + r.debt, 0) };
   }
 
@@ -148,7 +184,8 @@ export default function NetWorth() {
 
       {/* ── Sections ───────────────────────────────────────────────────────── */}
       {SECTIONS.map(({ key, label, num }) => {
-        const rows = store[key];
+        const isInvestments = key === 'investments';
+        const rows = isInvestments ? [] : (store[key as keyof Store] as Row[]);
         const s    = sub(key);
         const net  = s.value - s.debt;
         const isLiability = key === 'liabilities';
@@ -157,10 +194,25 @@ export default function NetWorth() {
           <div key={key} className="card overflow-hidden p-0">
 
             {/* Section header */}
-            <div className="bg-blue-950/70 border-b border-blue-900 px-4 py-2.5">
+            <div className="bg-blue-950/70 border-b border-blue-900 px-4 py-2.5 flex items-center justify-between">
               <h2 className="text-xs font-bold text-blue-300 uppercase tracking-widest">
                 {num}. {label}
               </h2>
+              {isInvestments && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-500">Synced from Portfolio · USD/CAD</span>
+                  <input
+                    type="number" step="0.0001"
+                    value={usdCadRate}
+                    onChange={e => setUsdCadRate(parseFloat(e.target.value) || 1.38)}
+                    onBlur={() => syncPortfolio()}
+                    className="w-16 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-xs text-zinc-300 text-center focus:outline-none focus:border-blue-500"
+                  />
+                  <button onClick={syncPortfolio} className="text-zinc-500 hover:text-zinc-300 transition-colors" title="Refresh from Portfolio">
+                    <RefreshCw size={12} className={syncing ? 'animate-spin' : ''} />
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="overflow-x-auto">
@@ -176,6 +228,25 @@ export default function NetWorth() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/60">
+                  {/* Portfolio-synced investment rows (read-only) */}
+                  {isInvestments && (
+                    portfolioAccounts.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="td text-center text-zinc-600 text-xs py-4">
+                          {syncing ? 'Syncing from Portfolio…' : 'No holdings in Portfolio yet.'}
+                        </td>
+                      </tr>
+                    ) : portfolioAccounts.map(pa => (
+                      <tr key={pa.account} className="bg-zinc-900/20">
+                        <td className="td text-sm text-zinc-300 font-medium">{pa.account}</td>
+                        <td className="td text-xs text-zinc-500">{pa.description}</td>
+                        <td className="td tabular-nums text-right text-sm text-zinc-100">{fmt$(pa.valueCAD)}</td>
+                        <td className="td text-right text-zinc-600">—</td>
+                        <td className="td tabular-nums text-right text-sm font-medium text-emerald-400">{fmt$(pa.valueCAD)}</td>
+                        <td className="td text-xs text-zinc-700 text-right">cost basis</td>
+                      </tr>
+                    ))
+                  )}
                   {rows.map(row => (
                     editId === row.id ? (
                       /* ── Edit row ── */
@@ -275,15 +346,17 @@ export default function NetWorth() {
               </table>
             </div>
 
-            {/* Add row */}
-            <div className="px-4 py-2 border-t border-zinc-800/60">
-              <button
-                onClick={() => addRow(key)}
-                className="flex items-center gap-1.5 text-xs text-zinc-600 hover:text-zinc-300 transition-colors"
-              >
-                <Plus size={11} /> Add row
-              </button>
-            </div>
+            {/* Add row — hidden for investments (auto-synced from Portfolio) */}
+            {!isInvestments && (
+              <div className="px-4 py-2 border-t border-zinc-800/60">
+                <button
+                  onClick={() => addRow(key)}
+                  className="flex items-center gap-1.5 text-xs text-zinc-600 hover:text-zinc-300 transition-colors"
+                >
+                  <Plus size={11} /> Add row
+                </button>
+              </div>
+            )}
           </div>
         );
       })}
@@ -308,7 +381,7 @@ export default function NetWorth() {
         {/* Asset breakdown bar */}
         <div className="mt-4 space-y-2">
           {SECTIONS.filter(s => s.key !== 'liabilities').map(({ key, label }) => {
-            const v = sub(key).value;
+            const v = key === 'investments' ? investmentTotal : sub(key).value;
             const pct = totalAssets > 0 ? (v / totalAssets) * 100 : 0;
             if (v === 0) return null;
             return (

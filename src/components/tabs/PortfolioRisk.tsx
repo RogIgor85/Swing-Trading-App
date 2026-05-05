@@ -33,7 +33,7 @@ const SECTORS = [
   'Communication Services', 'Consumer Staples', 'Other',
 ];
 
-const ACCOUNTS: Account[] = ['Brokerage', 'RRSP', 'LIRA', 'TSFA', 'HSA', 'Other'];
+const ACCOUNTS: Account[] = ['Brokerage', 'RRSP', 'LIRA', 'TSFA', 'HSA', 'Crypto', 'Other'];
 const CURRENCIES: Currency[] = ['USD', 'CAD'];
 
 const SECTOR_COLORS = [
@@ -50,11 +50,12 @@ const liquidityBg: Record<LiquidityRisk, string> = {
 
 const accountColors: Record<Account, string> = {
   Brokerage: 'text-blue-400',
-  RRSP: 'text-emerald-400',
-  LIRA: 'text-purple-400',
-  TSFA: 'text-amber-400',
-  HSA: 'text-cyan-400',
-  Other: 'text-zinc-400',
+  RRSP:      'text-emerald-400',
+  LIRA:      'text-purple-400',
+  TSFA:      'text-amber-400',
+  HSA:       'text-cyan-400',
+  Crypto:    'text-orange-400',
+  Other:     'text-zinc-400',
 };
 
 const defaultForm = {
