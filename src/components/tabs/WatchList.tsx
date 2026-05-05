@@ -45,8 +45,9 @@ export default function WatchList() {
   const [targetEntry, setTargetEntry] = useState('');
   const [adding, setAdding] = useState(false);
   const [fetchingPrice, setFetchingPrice] = useState(false);
-  const [sortBy, setSortBy]           = useState<'alpha' | 'market'>('alpha');
+  const [sortBy, setSortBy]             = useState<'alpha' | 'market'>('alpha');
   const [filterMarket, setFilterMarket] = useState<'ALL' | 'US' | 'TSX'>('ALL');
+  const [filterZone, setFilterZone]     = useState<'ALL' | 'BUY' | 'ABOVE'>('ALL');
   const [drawer, setDrawer] = useState<{ ticker: string; currency: string } | null>(null);
 
   // Buy inline form
@@ -333,15 +334,33 @@ export default function WatchList() {
     return /\.(TO|V|TSX|CN|NEO|VN)$/i.test(ticker) ? 'TSX' : 'US';
   }
 
-  const filtered = filterMarket === 'ALL'
-    ? items
-    : items.filter((i) => getMarket(i.ticker) === filterMarket);
+  // Pre-compute entry zone per item so we can sort/filter before rendering
+  const ZONE_ORDER = { below: 0, neutral: 1, above: 2 } as const;
+  type ZoneKey = keyof typeof ZONE_ORDER;
+
+  const withZone = items.map((item) => {
+    const cp = liveData[item.ticker]?.quote?.c ?? null;
+    const vs = cp && item.target_entry ? cp - item.target_entry : null;
+    const entryZone: ZoneKey = vs == null ? 'neutral' : vs > 0 ? 'above' : 'below';
+    return { ...item, entryZone };
+  });
+
+  const filtered = withZone
+    .filter((i) => filterMarket === 'ALL' || getMarket(i.ticker) === filterMarket)
+    .filter((i) =>
+      filterZone === 'ALL' ||
+      (filterZone === 'BUY'   && i.entryZone === 'below') ||
+      (filterZone === 'ABOVE' && i.entryZone === 'above')
+    );
 
   const sorted = [...filtered].sort((a, b) => {
-    // Conviction is always the primary sort: HIGH (green) → MEDIUM → LOW (red)
+    // 1st: buy zone — green (below entry) floats to top
+    const zoneDiff = ZONE_ORDER[a.entryZone] - ZONE_ORDER[b.entryZone];
+    if (zoneDiff !== 0) return zoneDiff;
+    // 2nd: conviction — HIGH → MEDIUM → LOW
     const convDiff = CONVICTION_ORDER.indexOf(a.conviction) - CONVICTION_ORDER.indexOf(b.conviction);
     if (convDiff !== 0) return convDiff;
-    // Secondary sort within each conviction group
+    // 3rd: user-chosen secondary sort
     if (sortBy === 'market') {
       const ma = getMarket(a.ticker), mb = getMarket(b.ticker);
       if (ma !== mb) return ma === 'TSX' ? -1 : 1;
@@ -459,6 +478,24 @@ export default function WatchList() {
                     : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'
                 }`}>
                 {m}
+              </button>
+            ))}
+          </div>
+
+          {/* Zone filter */}
+          <div className="flex gap-1">
+            {([
+              { key: 'ALL',   label: 'All Zones',      active: 'bg-zinc-700 text-zinc-200 border-zinc-500'          },
+              { key: 'BUY',   label: '🟢 Buy Zone',    active: 'bg-emerald-900/50 text-emerald-300 border-emerald-600' },
+              { key: 'ABOVE', label: '🔴 Above Entry', active: 'bg-red-900/50 text-red-300 border-red-700'           },
+            ] as const).map(({ key, label, active }) => (
+              <button key={key} onClick={() => setFilterZone(key)}
+                className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                  filterZone === key
+                    ? active
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'
+                }`}>
+                {label}
               </button>
             ))}
           </div>
