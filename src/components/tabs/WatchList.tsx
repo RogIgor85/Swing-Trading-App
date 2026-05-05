@@ -45,7 +45,7 @@ export default function WatchList() {
   const [targetEntry, setTargetEntry] = useState('');
   const [adding, setAdding] = useState(false);
   const [fetchingPrice, setFetchingPrice] = useState(false);
-  const [sortBy, setSortBy]           = useState<'conviction' | 'alpha' | 'market'>('conviction');
+  const [sortBy, setSortBy]           = useState<'alpha' | 'market'>('alpha');
   const [filterMarket, setFilterMarket] = useState<'ALL' | 'US' | 'TSX'>('ALL');
   const [drawer, setDrawer] = useState<{ ticker: string; currency: string } | null>(null);
 
@@ -338,16 +338,15 @@ export default function WatchList() {
     : items.filter((i) => getMarket(i.ticker) === filterMarket);
 
   const sorted = [...filtered].sort((a, b) => {
-    if (sortBy === 'conviction')
-      return CONVICTION_ORDER.indexOf(a.conviction) - CONVICTION_ORDER.indexOf(b.conviction);
-    if (sortBy === 'alpha')
-      return a.ticker.localeCompare(b.ticker);
+    // Conviction is always the primary sort: HIGH (green) → MEDIUM → LOW (red)
+    const convDiff = CONVICTION_ORDER.indexOf(a.conviction) - CONVICTION_ORDER.indexOf(b.conviction);
+    if (convDiff !== 0) return convDiff;
+    // Secondary sort within each conviction group
     if (sortBy === 'market') {
       const ma = getMarket(a.ticker), mb = getMarket(b.ticker);
       if (ma !== mb) return ma === 'TSX' ? -1 : 1;
-      return a.ticker.localeCompare(b.ticker);
     }
-    return 0;
+    return a.ticker.localeCompare(b.ticker);
   });
 
   return (
@@ -464,22 +463,24 @@ export default function WatchList() {
             ))}
           </div>
 
-          {/* Sort */}
-          <div className="flex gap-1">
-            {([
-              { key: 'conviction', label: 'Conviction' },
-              { key: 'alpha',      label: 'A → Z'      },
-              { key: 'market',     label: 'TSX / US'   },
-            ] as const).map(({ key, label }) => (
-              <button key={key} onClick={() => setSortBy(key)}
-                className={`text-xs px-3 py-1 rounded-full border transition-colors ${
-                  sortBy === key
-                    ? 'bg-zinc-700 text-zinc-200 border-zinc-500'
-                    : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'
-                }`}>
-                {label}
-              </button>
-            ))}
+          {/* Sort — conviction is always primary; these sort within each group */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-600">Within group:</span>
+            <div className="flex gap-1">
+              {([
+                { key: 'alpha',  label: 'A → Z'    },
+                { key: 'market', label: 'TSX / US' },
+              ] as const).map(({ key, label }) => (
+                <button key={key} onClick={() => setSortBy(key)}
+                  className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                    sortBy === key
+                      ? 'bg-zinc-700 text-zinc-200 border-zinc-500'
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'
+                  }`}>
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
