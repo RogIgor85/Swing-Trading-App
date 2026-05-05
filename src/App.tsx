@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { TrendingUp, Eye, ScanLine, PieChart, BookOpen, ClipboardList, Layers, LogOut, Wallet } from 'lucide-react';
+import { TrendingUp, Eye, ScanLine, PieChart, BookOpen, ClipboardList, Layers, LogOut, Wallet, Download } from 'lucide-react';
+import { exportAllToExcel } from './lib/exportExcel';
 import TriFrameScorecard from './components/tabs/TriFrameScorecard';
 import WatchList from './components/tabs/WatchList';
 import ChartAnalysis from './components/tabs/ChartAnalysis';
@@ -81,6 +82,14 @@ export default function App() {
                   {user.email}
                 </span>
               )}
+              <button
+                onClick={() => exportAllToExcel()}
+                title="Export all data to Excel"
+                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-emerald-400 transition-colors px-2 py-1 rounded-lg hover:bg-zinc-800"
+              >
+                <Download size={13} />
+                <span className="hidden sm:block">Export</span>
+              </button>
               {user && (
                 <button
                   onClick={handleSignOut}
