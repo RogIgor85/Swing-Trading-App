@@ -65,6 +65,8 @@ export interface Holding {
   currency: Currency;
   liquidity_risk: LiquidityRisk;
   notes: string;
+  purchase_date: string | null;
+  sell_date: string | null;
   created_at: string;
 }
 

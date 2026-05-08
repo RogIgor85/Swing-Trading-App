@@ -67,6 +67,8 @@ const defaultForm = {
   currency: 'USD' as Currency,
   liquidity_risk: 'LOW' as LiquidityRisk,
   notes: '',
+  purchase_date: '',
+  sell_date: '',
 };
 
 interface LivePrice { price: number; changePct: number; prevClose: number }
@@ -108,7 +110,7 @@ export default function PortfolioRisk() {
   const [sellLoading, setSellLoading] = useState(false);
 
 
-  type SortKey = 'ticker' | 'account' | 'currency' | 'shares' | 'avg_cost' | 'currentPrice' | 'changePct' | 'costBasis' | 'marketValue' | 'pnl' | 'allocationPct' | 'sector';
+  type SortKey = 'ticker' | 'account' | 'currency' | 'shares' | 'avg_cost' | 'currentPrice' | 'changePct' | 'costBasis' | 'marketValue' | 'pnl' | 'allocationPct' | 'sector' | 'purchase_date' | 'sell_date';
   const [sortKey, setSortKey]   = useState<SortKey | null>(null);
   const [sortDir, setSortDir]   = useState<'asc' | 'desc'>('asc');
 
@@ -224,6 +226,8 @@ export default function PortfolioRisk() {
           currency: form.currency,
           liquidity_risk: form.liquidity_risk,
           notes: form.notes,
+          purchase_date: form.purchase_date || null,
+          sell_date: form.sell_date || null,
           created_at: nowIso(),
         };
         await storage.update(TABLE, editId, holding);
@@ -252,6 +256,8 @@ export default function PortfolioRisk() {
             currency: form.currency,
             liquidity_risk: form.liquidity_risk,
             notes: form.notes,
+            purchase_date: form.purchase_date || null,
+            sell_date: form.sell_date || null,
             created_at: nowIso(),
           };
           await storage.insert(TABLE, holding);
@@ -275,6 +281,8 @@ export default function PortfolioRisk() {
       currency: h.currency,
       liquidity_risk: h.liquidity_risk,
       notes: h.notes,
+      purchase_date: h.purchase_date ?? '',
+      sell_date: h.sell_date ?? '',
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
@@ -503,6 +511,8 @@ export default function PortfolioRisk() {
               <option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option>
             </select>
           </div>
+          <div className="w-36"><label className="label">Purchase Date</label><input className="input-base" type="date" value={form.purchase_date} onChange={(e) => setForm({ ...form, purchase_date: e.target.value })} /></div>
+          <div className="w-36"><label className="label">Sell Date</label><input className="input-base" type="date" value={form.sell_date} onChange={(e) => setForm({ ...form, sell_date: e.target.value })} /></div>
           <div className="flex-1 min-w-28"><label className="label">Notes</label><input className="input-base" placeholder="Notes..." value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></div>
           <button type="submit" className="btn-primary flex items-center gap-2" disabled={loading}>
             {editId ? <Check size={14} /> : <Plus size={14} />}
@@ -648,6 +658,8 @@ export default function PortfolioRisk() {
                       { label: 'P&L (native)', key: 'pnl'           },
                       { label: 'Alloc %',      key: 'allocationPct' },
                       { label: 'Sector',       key: 'sector'        },
+                      { label: 'Purchase Date',key: 'purchase_date' },
+                      { label: 'Sell Date',    key: 'sell_date'     },
                     ] as { label: string; key: SortKey }[]).map(({ label, key }) => (
                       <th key={key} className="th">
                         <button
@@ -760,6 +772,8 @@ export default function PortfolioRisk() {
                         </div>
                       </td>
                       <td className="td text-xs text-zinc-400">{h.sector}</td>
+                      <td className="td text-xs text-zinc-400 tabular-nums whitespace-nowrap">{h.purchase_date ?? '—'}</td>
+                      <td className="td text-xs text-zinc-400 tabular-nums whitespace-nowrap">{h.sell_date ?? '—'}</td>
                       <td className="td">
                         {sellId === h.id ? (
                           <div className="flex items-center gap-1 flex-wrap">
