@@ -1,11 +1,9 @@
 import { useState, useEffect } from 'react';
 import { Plus, Trash2, Check, X, Pencil, RefreshCw } from 'lucide-react';
-import { storage } from '../../lib/storage';
+import { storage, newId, nowIso } from '../../lib/storage';
 import type { Holding } from '../../types';
 
-const STORAGE_KEY = 'swing_networth_v1';
-
-function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+const TABLE = 'net_worth_items';
 
 function fmt$(n: number, showDash = true) {
   if (showDash && n === 0) return '—';
@@ -20,6 +18,12 @@ interface Row {
   debt:        number;
 }
 
+// Shape stored in Supabase (flat, with section field)
+interface NwDbRow extends Row {
+  section:    string;
+  created_at: string;
+}
+
 type SectionKey = 'realProperty' | 'vehicles' | 'investments' | 'bankAccounts' | 'otherAssets' | 'liabilities';
 
 interface Store {
@@ -32,7 +36,7 @@ interface Store {
 
 interface PortfolioAccount { account: string; description: string; valueCAD: number }
 
-const DEFAULT: Store = {
+const EMPTY_STORE: Store = {
   realProperty: [],
   vehicles:     [],
   bankAccounts: [],
@@ -50,13 +54,15 @@ const ACCOUNT_DESCRIPTIONS: Record<string, string> = {
   Other:     'Other Investments',
 };
 
-function loadStore(): Store {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : DEFAULT;
-  } catch { return DEFAULT; }
+function rowsToStore(dbRows: NwDbRow[]): Store {
+  // getAll returns newest-first; reverse so rows appear in insertion order
+  const store: Store = { ...EMPTY_STORE, realProperty: [], vehicles: [], bankAccounts: [], otherAssets: [], liabilities: [] };
+  [...dbRows].reverse().forEach(r => {
+    const key = r.section as keyof Store;
+    if (key in store) store[key].push({ id: r.id, category: r.category, description: r.description, value: r.value, debt: r.debt });
+  });
+  return store;
 }
-function saveStore(s: Store) { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); }
 
 const SECTIONS: { key: SectionKey; label: string; num: number }[] = [
   { key: 'realProperty',  label: 'Real Property',  num: 1 },
@@ -70,70 +76,82 @@ const SECTIONS: { key: SectionKey; label: string; num: number }[] = [
 const MANUAL_ASSET_SECTIONS: SectionKey[] = ['realProperty', 'vehicles', 'bankAccounts', 'otherAssets'];
 
 export default function NetWorth() {
-  const [store, setStore]       = useState<Store>(loadStore);
+  const [store, setStore]       = useState<Store>(EMPTY_STORE);
+  const [loading, setLoading]   = useState(true);
   const [editId, setEditId]     = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Partial<Row>>({});
   const [portfolioAccounts, setPortfolioAccounts] = useState<PortfolioAccount[]>([]);
   const [usdCadRate, setUsdCadRate] = useState(1.38);
   const [syncing, setSyncing]   = useState(false);
 
+  // ── Load from Supabase on mount ─────────────────────────────────────────
+  useEffect(() => {
+    storage.getAll<NwDbRow>(TABLE)
+      .then(rows => setStore(rowsToStore(rows)))
+      .finally(() => setLoading(false));
+    syncPortfolio();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Portfolio sync ──────────────────────────────────────────────────────
   async function syncPortfolio() {
     setSyncing(true);
     try {
       const holdings = await storage.getAll<Holding>('holdings');
-      // Use manually-set prices from Portfolio tab when available (most up-to-date)
       const manualPrices: Record<string, number> = (() => {
         try { return JSON.parse(localStorage.getItem('swing_manual_prices') ?? '{}'); } catch { return {}; }
       })();
-
       const map: Record<string, number> = {};
       holdings.forEach(h => {
         const price    = manualPrices[h.ticker] ?? h.avg_cost;
         const valueCAD = h.shares * price * (h.currency === 'USD' ? usdCadRate : 1);
         map[h.account] = (map[h.account] ?? 0) + valueCAD;
       });
-      const accounts: PortfolioAccount[] = Object.entries(map)
-        .filter(([, v]) => v > 0)
-        .map(([account, valueCAD]) => ({
-          account,
-          description: ACCOUNT_DESCRIPTIONS[account] ?? account,
-          valueCAD,
-        }))
-        .sort((a, b) => b.valueCAD - a.valueCAD);
-      setPortfolioAccounts(accounts);
-    } finally {
-      setSyncing(false);
-    }
+      setPortfolioAccounts(
+        Object.entries(map)
+          .filter(([, v]) => v > 0)
+          .map(([account, valueCAD]) => ({ account, description: ACCOUNT_DESCRIPTIONS[account] ?? account, valueCAD }))
+          .sort((a, b) => b.valueCAD - a.valueCAD)
+      );
+    } finally { setSyncing(false); }
   }
 
-  useEffect(() => { syncPortfolio(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function mutate(section: SectionKey, rows: Row[]) {
-    const next = { ...store, [section]: rows };
-    setStore(next);
-    saveStore(next);
-  }
-
+  // ── CRUD ────────────────────────────────────────────────────────────────
   function startEdit(row: Row) { setEditId(row.id); setEditForm({ ...row }); }
-  function cancelEdit() { setEditId(null); setEditForm({}); }
+  function cancelEdit()        { setEditId(null);   setEditForm({}); }
 
-  function commitEdit(section: SectionKey) {
-    mutate(section, (store[section as keyof Store] as Row[]).map(r =>
-      r.id === editId
-        ? { ...r, ...editForm, value: Number(editForm.value ?? 0), debt: Number(editForm.debt ?? 0) }
-        : r
-    ));
+  async function commitEdit(section: SectionKey) {
+    if (!editId) return;
+    const patch = {
+      category:    editForm.category    ?? '',
+      description: editForm.description ?? '',
+      value:       Number(editForm.value ?? 0),
+      debt:        Number(editForm.debt  ?? 0),
+    };
+    await storage.update(TABLE, editId, patch);
+    setStore(prev => ({
+      ...prev,
+      [section]: (prev[section as keyof Store] as Row[]).map(r => r.id === editId ? { ...r, ...patch } : r),
+    }));
     setEditId(null); setEditForm({});
   }
 
-  function addRow(section: SectionKey) {
-    mutate(section, [...(store[section as keyof Store] as Row[]), { id: uid(), category: '', description: '', value: 0, debt: 0 }]);
+  async function addRow(section: SectionKey) {
+    const row: NwDbRow = { id: newId(), section, category: '', description: '', value: 0, debt: 0, created_at: nowIso() };
+    await storage.insert(TABLE, row);
+    setStore(prev => ({ ...prev, [section]: [...(prev[section as keyof Store] as Row[]), { id: row.id, category: '', description: '', value: 0, debt: 0 }] }));
   }
 
-  function deleteRow(section: SectionKey, id: string) {
+  async function deleteRow(section: SectionKey, id: string) {
     if (!window.confirm('Delete this row?')) return;
-    mutate(section, (store[section as keyof Store] as Row[]).filter(r => r.id !== id));
+    await storage.remove(TABLE, id);
+    setStore(prev => ({ ...prev, [section]: (prev[section as keyof Store] as Row[]).filter(r => r.id !== id) }));
   }
+
+  if (loading) return (
+    <div className="flex items-center justify-center py-20 text-zinc-500 text-sm gap-2">
+      <RefreshCw size={14} className="animate-spin" /> Loading Net Worth…
+    </div>
+  );
 
   // Totals — investments come from portfolio sync, rest from manual store
   const investmentTotal = portfolioAccounts.reduce((s, a) => s + a.valueCAD, 0);
