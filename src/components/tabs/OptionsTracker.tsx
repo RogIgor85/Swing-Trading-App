@@ -218,10 +218,17 @@ export default function OptionsTracker() {
       setForm(emptyForm());
       await load();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Common Supabase error: table doesn't exist
-      if (msg.includes('does not exist') || msg.includes('relation')) {
-        setError('Database table not found. Please run the Supabase SQL to create the option_trades table first.');
+      // Supabase throws a PostgrestError object (not a standard Error)
+      let msg = 'Unknown error';
+      if (err instanceof Error) {
+        msg = err.message;
+      } else if (typeof err === 'object' && err !== null && 'message' in err) {
+        msg = String((err as { message: unknown }).message);
+      } else {
+        msg = JSON.stringify(err);
+      }
+      if (msg.includes('does not exist') || msg.includes('relation') || msg.includes('42P01')) {
+        setError('The option_trades table does not exist in Supabase yet. Please run the SQL setup in the Supabase SQL Editor.');
       } else {
         setError(`Save failed: ${msg}`);
       }
