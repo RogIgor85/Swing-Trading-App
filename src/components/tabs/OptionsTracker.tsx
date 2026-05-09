@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, X, Check, Trash2, Pencil, ChevronDown, ChevronUp, Clock, TrendingUp, TrendingDown, AlertTriangle, Target } from 'lucide-react';
+import { Plus, X, Check, Trash2, Pencil, ChevronDown, ChevronUp, Clock, AlertTriangle, Target, ExternalLink } from 'lucide-react';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { fmtCurrency } from '../../lib/utils';
 import type { Account, Currency } from '../../types';
@@ -94,6 +94,12 @@ function breakEven(t: OptionTrade): number {
   return t.option_type === 'CALL'
     ? t.strike + t.premium_paid
     : t.strike - t.premium_paid;
+}
+
+function barchartUrl(ticker: string): string {
+  // TSX tickers end in .TO — Barchart uses the root symbol without suffix
+  const clean = ticker.replace(/\.TO$/i, '');
+  return `https://www.barchart.com/stocks/quotes/${clean}/options`;
 }
 
 function fmt$(n: number) {
@@ -487,9 +493,18 @@ export default function OptionsTracker() {
                   <div className="flex items-center gap-3 p-4 flex-wrap">
 
                     {/* Ticker + type */}
-                    <div className="w-32 flex-shrink-0">
+                    <div className="w-36 flex-shrink-0">
                       <div className="flex items-center gap-2">
-                        <span className="font-mono font-bold text-zinc-100 text-base">{t.underlying}</span>
+                        <a
+                          href={barchartUrl(t.underlying)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 transition-colors flex items-center gap-1 group"
+                          title={`View ${t.underlying} options chain on Barchart`}
+                        >
+                          {t.underlying}
+                          <ExternalLink size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
+                        </a>
                         <span className={`text-xs font-bold ${TYPE_COLORS[t.option_type]}`}>{t.option_type}</span>
                       </div>
                       <div className="text-xs text-zinc-500 mt-0.5">{t.strategy}</div>
