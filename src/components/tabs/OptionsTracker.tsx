@@ -526,10 +526,15 @@ export default function OptionsTracker() {
                       </div>
                     )}
 
-                    {/* Premium */}
+                    {/* Premium + capital at risk */}
                     <div className="flex-shrink-0">
-                      <div className="text-xs text-zinc-500">Paid</div>
+                      <div className="text-xs text-zinc-500">Paid / share</div>
                       <div className="text-sm font-mono text-zinc-200">${t.premium_paid.toFixed(2)}</div>
+                    </div>
+                    <div className="flex-shrink-0">
+                      <div className="text-xs text-zinc-500">Capital at Risk</div>
+                      <div className="text-sm font-mono text-red-400 font-semibold">{fmt$(cost)}</div>
+                      <div className="text-xs text-zinc-600">{t.contracts}×100 shares</div>
                     </div>
 
                     {/* Current option premium (editable for open) */}
