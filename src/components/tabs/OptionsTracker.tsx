@@ -517,10 +517,10 @@ export default function OptionsTracker() {
                       <div className="text-sm font-mono text-zinc-200">${t.premium_paid.toFixed(2)}</div>
                     </div>
 
-                    {/* Current premium (editable for open) */}
+                    {/* Current option premium (editable for open) */}
                     {t.status === 'OPEN' && (
                       <div className="flex-shrink-0">
-                        <div className="text-xs text-zinc-500">Current</div>
+                        <div className="text-xs text-zinc-500">Option Premium</div>
                         {updateId === t.id ? (
                           <div className="flex items-center gap-1">
                             <input
@@ -529,33 +529,35 @@ export default function OptionsTracker() {
                               value={updatePremium}
                               onChange={e => setUpdatePremium(e.target.value)}
                               onKeyDown={e => { if (e.key === 'Enter') handleUpdatePremium(t.id); if (e.key === 'Escape') setUpdateId(null); }}
+                              placeholder="e.g. 12.50"
                               autoFocus
                             />
-                            <button onClick={() => handleUpdatePremium(t.id)} className="text-emerald-400 p-0.5"><Check size={12} /></button>
-                            <button onClick={() => setUpdateId(null)} className="text-zinc-500 p-0.5"><X size={12} /></button>
+                            <button onClick={() => handleUpdatePremium(t.id)} className="text-emerald-400 p-0.5" title="Save"><Check size={12} /></button>
+                            <button onClick={() => { storage.update(TABLE, t.id, { current_premium: null }).then(load); setUpdateId(null); }} className="text-zinc-500 hover:text-red-400 p-0.5" title="Clear"><X size={12} /></button>
                           </div>
                         ) : (
                           <button
                             onClick={() => { setUpdateId(t.id); setUpdatePremium(t.current_premium?.toString() ?? ''); }}
                             className="text-sm font-mono text-blue-400 hover:text-blue-300 transition-colors"
-                            title="Click to update current premium"
+                            title="Enter the option's current bid/ask premium (per share) — NOT the stock price"
                           >
-                            {t.current_premium != null ? `$${t.current_premium.toFixed(2)}` : <span className="text-zinc-600 text-xs">click to set</span>}
+                            {t.current_premium != null ? `$${t.current_premium.toFixed(2)}/sh` : <span className="text-zinc-600 text-xs italic">set option premium</span>}
                           </button>
                         )}
+                        <div className="text-zinc-700 text-xs mt-0.5">option price, not stock</div>
                       </div>
                     )}
 
-                    {/* P&L */}
+                    {/* P&L — only shown when current option premium is set */}
                     <div className="flex-shrink-0">
                       <div className="text-xs text-zinc-500">{t.status === 'OPEN' ? 'Unrealized' : 'Realized'} P&L</div>
-                      {pnl != null ? (
+                      {pnl != null && (t.status !== 'OPEN' || t.current_premium != null) ? (
                         <div className={`text-sm font-bold tabular-nums ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                           {fmtPnl(pnl)}
                           {pnlPct != null && <span className="text-xs ml-1 font-normal">({pnl >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%)</span>}
                         </div>
                       ) : (
-                        <div className="text-xs text-zinc-600">—</div>
+                        <div className="text-xs text-zinc-600">{t.status === 'OPEN' ? 'set option premium →' : '—'}</div>
                       )}
                     </div>
 
