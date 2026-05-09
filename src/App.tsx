@@ -7,7 +7,7 @@ import ChartAnalysis from './components/tabs/ChartAnalysis';
 import PortfolioRisk from './components/tabs/PortfolioRisk';
 import Fundamentals from './components/tabs/Fundamentals';
 import TradeJournal from './components/tabs/TradeJournal';
-import SprintTracker from './components/tabs/SprintTracker';
+import OptionsTracker from './components/tabs/OptionsTracker';
 import NetWorth from './components/tabs/NetWorth';
 import Auth from './components/Auth';
 import { supabase } from './lib/supabase';
@@ -19,7 +19,7 @@ const TABS = [
   { id: 'technical', label: 'Chart Analysis', icon: ScanLine },
   { id: 'portfolio', label: 'Portfolio',    icon: PieChart },
   { id: 'journal',   label: 'Trade Journal', icon: ClipboardList },
-  { id: 'sprint',    label: 'Swing Trade',   icon: TrendingUp },
+  { id: 'sprint',    label: 'Options',        icon: TrendingUp },
   { id: 'networth',     label: 'Net Worth',    icon: Wallet },
   { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
 ] as const;
@@ -133,7 +133,7 @@ export default function App() {
         {activeTab === 'portfolio' && <PortfolioRisk />}
         {activeTab === 'fundamentals' && <Fundamentals />}
         {activeTab === 'journal' && <TradeJournal />}
-        {activeTab === 'sprint' && <SprintTracker />}
+        {activeTab === 'sprint' && <OptionsTracker />}
         {activeTab === 'networth' && <NetWorth />}
       </main>
     </div>
