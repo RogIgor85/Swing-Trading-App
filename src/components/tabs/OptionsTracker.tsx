@@ -144,6 +144,7 @@ export default function OptionsTracker() {
   const [filterStatus, setFilterStatus] = useState<'ALL' | OptionStatus>('OPEN');
   const [updateId, setUpdateId]   = useState<string | null>(null);
   const [updatePremium, setUpdatePremium] = useState('');
+  const [error, setError]         = useState<string | null>(null);
 
   async function load() {
     try {
@@ -170,28 +171,40 @@ export default function OptionsTracker() {
   // ── Submit new / edit ──────────────────────────────────────────────────────
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.underlying || !form.strike || !form.premium_paid || !form.expiration) return;
+    setError(null);
+
+    // Explicit validation with feedback
+    const missing: string[] = [];
+    if (!form.underlying?.trim()) missing.push('Underlying ticker');
+    if (!form.expiration)          missing.push('Expiration date');
+    if (!form.strike)              missing.push('Strike price');
+    if (!form.premium_paid)        missing.push('Premium paid');
+    if (missing.length > 0) {
+      setError(`Missing required fields: ${missing.join(', ')}`);
+      return;
+    }
+
     setSaving(true);
     try {
       const trade: OptionTrade = {
         id:              editId ?? newId(),
         underlying:      form.underlying!.toUpperCase().trim(),
-        option_type:     form.option_type!,
-        strategy:        form.strategy!,
+        option_type:     form.option_type ?? 'CALL',
+        strategy:        form.strategy    ?? 'Long Call',
         strike:          Number(form.strike),
         expiration:      form.expiration!,
         contracts:       Number(form.contracts ?? 1),
         premium_paid:    Number(form.premium_paid),
         current_premium: form.current_premium ?? null,
-        iv:              form.iv ?? null,
+        iv:              form.iv    ?? null,
         delta:           form.delta ?? null,
         theta:           form.theta ?? null,
-        account:         form.account!,
-        currency:        form.currency!,
-        entry_date:      form.entry_date!,
-        exit_date:       form.exit_date ?? null,
+        account:         form.account   ?? 'Brokerage',
+        currency:        form.currency  ?? 'USD',
+        entry_date:      form.entry_date ?? new Date().toISOString().slice(0, 10),
+        exit_date:       form.exit_date    ?? null,
         exit_premium:    form.exit_premium ?? null,
-        status:          form.status ?? 'OPEN',
+        status:          'OPEN',
         notes:           form.notes ?? '',
         created_at:      nowIso(),
       };
@@ -204,6 +217,14 @@ export default function OptionsTracker() {
       setEditId(null);
       setForm(emptyForm());
       await load();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Common Supabase error: table doesn't exist
+      if (msg.includes('does not exist') || msg.includes('relation')) {
+        setError('Database table not found. Please run the Supabase SQL to create the option_trades table first.');
+      } else {
+        setError(`Save failed: ${msg}`);
+      }
     } finally { setSaving(false); }
   }
 
@@ -399,6 +420,12 @@ export default function OptionsTracker() {
               </div>
             )}
 
+            {error && (
+              <div className="flex items-start gap-2 bg-red-950/50 border border-red-800 rounded-lg px-3 py-2 text-sm text-red-300">
+                <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
+                {error}
+              </div>
+            )}
             <button type="submit" className="btn-primary flex items-center gap-2" disabled={saving}>
               <Check size={14} />
               {saving ? 'Saving…' : editId ? 'Update Trade' : 'Add Option Trade'}
