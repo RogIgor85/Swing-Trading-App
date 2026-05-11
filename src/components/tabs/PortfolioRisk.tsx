@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle, ExternalLink, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
+import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle, ExternalLink, ChevronUp, ChevronDown, ChevronsUpDown, Calendar } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
@@ -511,8 +511,20 @@ export default function PortfolioRisk() {
               <option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option>
             </select>
           </div>
-          <div className="w-36"><label className="label">Purchase Date</label><input className="input-base" type="date" value={form.purchase_date} onChange={(e) => setForm({ ...form, purchase_date: e.target.value })} /></div>
-          <div className="w-36"><label className="label">Sell Date</label><input className="input-base" type="date" value={form.sell_date} onChange={(e) => setForm({ ...form, sell_date: e.target.value })} /></div>
+          <div className="w-36">
+            <label className="label">Purchase Date</label>
+            <div className="relative">
+              <input className="input-base pr-8" type="date" value={form.purchase_date} onChange={(e) => setForm({ ...form, purchase_date: e.target.value })} />
+              <Calendar size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
+            </div>
+          </div>
+          <div className="w-36">
+            <label className="label">Sell Date</label>
+            <div className="relative">
+              <input className="input-base pr-8" type="date" value={form.sell_date} onChange={(e) => setForm({ ...form, sell_date: e.target.value })} />
+              <Calendar size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
+            </div>
+          </div>
           <div className="flex-1 min-w-28"><label className="label">Notes</label><input className="input-base" placeholder="Notes..." value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></div>
           <button type="submit" className="btn-primary flex items-center gap-2" disabled={loading}>
             {editId ? <Check size={14} /> : <Plus size={14} />}
