@@ -727,142 +727,118 @@ export default function OptionsTracker() {
                     </div>
                   )}
 
-                  {/* ── Main row ── */}
-                  <div className="flex items-center gap-3 p-4 flex-wrap">
+                  {/* ── Main card content ── */}
+                  <div className="p-4 space-y-3">
 
-                    {/* Ticker + type */}
-                    <div className="w-36 flex-shrink-0">
-                      <div className="flex items-center gap-2">
-                        <a
-                          href={barchartUrl(t.underlying)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 transition-colors flex items-center gap-1 group"
-                          title={`View ${t.underlying} options chain on Barchart`}
-                        >
-                          {t.underlying}
-                          <ExternalLink size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
-                        </a>
-                        <span className={`text-xs font-bold ${TYPE_COLORS[t.option_type]}`}>{t.option_type}</span>
-                      </div>
-                      <div className="text-xs text-zinc-500 mt-0.5">{t.strategy}</div>
-                    </div>
-
-                    {/* Contract details */}
-                    <div className="flex-shrink-0">
-                      <div className="text-sm font-mono text-zinc-200">
-                        ${t.strike} · {t.expiration}
-                      </div>
-                      <div className="text-xs text-zinc-500">{t.contracts} contract{t.contracts !== 1 ? 's' : ''}</div>
-                    </div>
-
-                    {/* DTE */}
-                    {t.status === 'OPEN' && (
-                      <div className="flex-shrink-0 text-center">
-                        <div className={`text-lg font-bold tabular-nums ${dteColor}`}>{dte}</div>
-                        <div className="text-xs text-zinc-600">DTE</div>
-                      </div>
-                    )}
-
-                    {/* Premium + capital at risk */}
-                    <div className="flex-shrink-0">
-                      <div className="text-xs text-zinc-500">Paid / share</div>
-                      <div className="text-sm font-mono text-zinc-200">${t.premium_paid.toFixed(2)}</div>
-                    </div>
-                    <div className="flex-shrink-0">
-                      <div className="text-xs text-zinc-500">Capital at Risk</div>
-                      <div className="text-sm font-mono text-red-400 font-semibold">{fmt$(cost)}</div>
-                      <div className="text-xs text-zinc-600">{t.contracts}×100 shares</div>
-                    </div>
-
-                    {/* Current option premium (editable for open) */}
-                    {t.status === 'OPEN' && (
-                      <div className="flex-shrink-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-xs text-zinc-500">Option Premium</span>
-                          {isLive && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-900/60 text-emerald-400 border border-emerald-800 font-semibold leading-none">LIVE</span>
-                          )}
-                        </div>
-                        {updateId === t.id ? (
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="number" step="0.01"
-                              className="w-20 bg-zinc-700 border border-blue-500 rounded px-1.5 py-0.5 text-xs text-zinc-100 tabular-nums focus:outline-none"
-                              value={updatePremium}
-                              onChange={e => setUpdatePremium(e.target.value)}
-                              onKeyDown={e => { if (e.key === 'Enter') handleUpdatePremium(t.id); if (e.key === 'Escape') setUpdateId(null); }}
-                              placeholder="e.g. 12.50"
-                              autoFocus
-                            />
-                            <button onClick={() => handleUpdatePremium(t.id)} className="text-emerald-400 p-0.5" title="Save"><Check size={12} /></button>
-                            <button onClick={() => { storage.update(TABLE, t.id, { current_premium: null }).then(load); setUpdateId(null); }} className="text-zinc-500 hover:text-red-400 p-0.5" title="Clear"><X size={12} /></button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => { setUpdateId(t.id); setUpdatePremium((et.current_premium ?? t.current_premium)?.toString() ?? ''); }}
-                            className={`text-sm font-mono transition-colors ${isLive ? 'text-emerald-400 hover:text-emerald-300' : 'text-blue-400 hover:text-blue-300'}`}
-                            title={isLive ? 'Live mid-price from Massive API (click to override manually)' : 'Enter the option\'s current bid/ask premium (per share) — NOT the stock price'}
-                          >
-                            {et.current_premium != null
-                              ? `$${et.current_premium.toFixed(2)}/sh`
-                              : <span className="text-zinc-600 text-xs italic">set option premium</span>}
+                    {/* Row 1: Ticker / type / DTE pill / status / actions */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <a href={barchartUrl(t.underlying)} target="_blank" rel="noopener noreferrer"
+                        className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 flex items-center gap-1 group"
+                        title={`View ${t.underlying} options chain on Barchart`}>
+                        {t.underlying}
+                        <ExternalLink size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
+                      </a>
+                      <span className={`text-xs font-bold ${TYPE_COLORS[t.option_type]}`}>{t.option_type}</span>
+                      <span className="text-xs text-zinc-500">{t.strategy}</span>
+                      {t.status === 'OPEN' && (
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full border tabular-nums ${
+                          dte <= 7  ? 'bg-red-950/40 border-red-700 text-red-400' :
+                          dte <= 21 ? 'bg-amber-950/40 border-amber-700 text-amber-400' :
+                                      'bg-zinc-800 border-zinc-700 text-zinc-400'
+                        }`}>{dte}d DTE</span>
+                      )}
+                      {/* Status + actions pushed right */}
+                      <div className="ml-auto flex items-center gap-1.5">
+                        <span className="hidden sm:inline text-xs text-zinc-600">{t.account} · {t.currency}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[t.status]}`}>{t.status}</span>
+                        <button onClick={() => setExpandId(isExpanded ? null : t.id)} className="btn-ghost p-1.5" title="Details">
+                          {isExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                        </button>
+                        {t.status === 'OPEN' && (
+                          <button onClick={() => { setCloseId(t.id); setCloseForm({ exit_premium: '', exit_date: new Date().toISOString().slice(0,10), status: 'CLOSED' }); }}
+                            className="text-xs px-2 py-1 rounded border border-amber-700 text-amber-400 hover:bg-amber-900/30 transition-colors">
+                            Close
                           </button>
                         )}
-                        {priceErrors[t.id] && !isLive && (
-                          <div className="text-[10px] text-amber-600 mt-0.5">{priceErrors[t.id]}</div>
-                        )}
-                        {!isLive && <div className="text-zinc-700 text-xs mt-0.5">option price, not stock</div>}
+                        <button onClick={() => startEdit(t)} className="btn-ghost p-1.5" title="Edit"><Pencil size={11} /></button>
+                        <button onClick={() => handleDelete(t.id)} className="btn-danger p-1.5" title="Delete"><Trash2 size={11} /></button>
                       </div>
-                    )}
-
-                    {/* P&L — only shown when current option premium is set */}
-                    <div className="flex-shrink-0">
-                      <div className="text-xs text-zinc-500">{t.status === 'OPEN' ? 'Unrealized' : 'Realized'} P&L</div>
-                      {pnl != null && (t.status !== 'OPEN' || et.current_premium != null) ? (
-                        <div className={`text-sm font-bold tabular-nums ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {fmtPnl(pnl)}
-                          {pnlPct != null && <span className="text-xs ml-1 font-normal">({pnl >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%)</span>}
-                        </div>
-                      ) : (
-                        <div className="text-xs text-zinc-600">{t.status === 'OPEN' ? (apiKey ? 'fetching…' : 'set option premium →') : '—'}</div>
-                      )}
                     </div>
 
-                    {/* Break-even */}
-                    <div className="flex-shrink-0">
-                      <div className="text-xs text-zinc-500">Break-even</div>
-                      <div className="text-sm font-mono text-zinc-300">${breakEven(t).toFixed(2)}</div>
-                    </div>
+                    {/* Row 2: Data grid — wraps on mobile */}
+                    <div className="flex flex-wrap gap-x-5 gap-y-2">
 
-                    {/* Greeks strip */}
-                    <div className="flex gap-3 flex-shrink-0 text-xs">
-                      {t.iv != null    && <span className="text-zinc-500">IV <strong className="text-amber-400">{t.iv.toFixed(1)}%</strong></span>}
-                      {t.delta != null && <span className="text-zinc-500">Δ <strong className="text-zinc-200">{t.delta.toFixed(2)}</strong></span>}
-                      {t.theta != null && <span className="text-zinc-500">Θ <strong className="text-red-400">${t.theta.toFixed(2)}/d</strong></span>}
-                    </div>
+                      {/* Strike · Expiry · Contracts */}
+                      <div>
+                        <div className="text-xs text-zinc-500">Strike · Expiry</div>
+                        <div className="text-sm font-mono text-zinc-200">${t.strike} · {t.expiration}</div>
+                        <div className="text-xs text-zinc-500">{t.contracts} contract{t.contracts !== 1 ? 's' : ''}</div>
+                      </div>
 
-                    {/* Account + status */}
-                    <div className="flex items-center gap-2 ml-auto flex-shrink-0">
-                      <span className="text-xs text-zinc-600">{t.account} · {t.currency}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[t.status]}`}>{t.status}</span>
-                    </div>
+                      {/* Capital at Risk */}
+                      <div>
+                        <div className="text-xs text-zinc-500">Capital at Risk</div>
+                        <div className="text-sm font-mono text-red-400 font-semibold">{fmt$(cost)}</div>
+                        <div className="text-xs text-zinc-600">${t.premium_paid.toFixed(2)}/sh paid</div>
+                      </div>
 
-                    {/* Actions */}
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      <button onClick={() => setExpandId(isExpanded ? null : t.id)} className="btn-ghost p-1.5" title="Details">
-                        {isExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-                      </button>
+                      {/* Current option premium */}
                       {t.status === 'OPEN' && (
-                        <button
-                          onClick={() => { setCloseId(t.id); setCloseForm({ exit_premium: '', exit_date: new Date().toISOString().slice(0,10), status: 'CLOSED' }); }}
-                          className="text-xs px-2 py-1 rounded border border-amber-700 text-amber-400 hover:bg-amber-900/30 transition-colors"
-                        >
-                          Close
-                        </button>
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs text-zinc-500">Curr. Premium</span>
+                            {isLive && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-900/60 text-emerald-400 border border-emerald-800 font-semibold leading-none">LIVE</span>}
+                          </div>
+                          {updateId === t.id ? (
+                            <div className="flex items-center gap-1">
+                              <input type="number" step="0.01"
+                                className="w-20 bg-zinc-700 border border-blue-500 rounded px-1.5 py-0.5 text-xs text-zinc-100 tabular-nums focus:outline-none"
+                                value={updatePremium}
+                                onChange={e => setUpdatePremium(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') handleUpdatePremium(t.id); if (e.key === 'Escape') setUpdateId(null); }}
+                                placeholder="e.g. 12.50" autoFocus />
+                              <button onClick={() => handleUpdatePremium(t.id)} className="text-emerald-400 p-0.5"><Check size={12} /></button>
+                              <button onClick={() => { storage.update(TABLE, t.id, { current_premium: null }).then(load); setUpdateId(null); }} className="text-zinc-500 hover:text-red-400 p-0.5"><X size={12} /></button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => { setUpdateId(t.id); setUpdatePremium((et.current_premium ?? t.current_premium)?.toString() ?? ''); }}
+                              className={`text-sm font-mono transition-colors ${isLive ? 'text-emerald-400 hover:text-emerald-300' : 'text-blue-400 hover:text-blue-300'}`}
+                              title="Tap to update option premium">
+                              {et.current_premium != null ? `$${et.current_premium.toFixed(2)}/sh` : <span className="text-zinc-600 text-xs italic">tap to set</span>}
+                            </button>
+                          )}
+                          {priceErrors[t.id] && !isLive && <div className="text-[10px] text-amber-600 mt-0.5">{priceErrors[t.id]}</div>}
+                        </div>
                       )}
-                      <button onClick={() => startEdit(t)} className="btn-ghost p-1.5" title="Edit"><Pencil size={11} /></button>
-                      <button onClick={() => handleDelete(t.id)} className="btn-danger p-1.5" title="Delete"><Trash2 size={11} /></button>
+
+                      {/* P&L */}
+                      <div>
+                        <div className="text-xs text-zinc-500">{t.status === 'OPEN' ? 'Unrealized' : 'Realized'} P&L</div>
+                        {pnl != null && (t.status !== 'OPEN' || et.current_premium != null) ? (
+                          <div className={`text-sm font-bold tabular-nums ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {fmtPnl(pnl)}
+                            {pnlPct != null && <span className="text-xs ml-1 font-normal">({pnl >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%)</span>}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-zinc-600">{t.status === 'OPEN' ? 'set premium →' : '—'}</div>
+                        )}
+                      </div>
+
+                      {/* Break-even */}
+                      <div>
+                        <div className="text-xs text-zinc-500">Break-even</div>
+                        <div className="text-sm font-mono text-zinc-300">${breakEven(t).toFixed(2)}</div>
+                      </div>
+
+                      {/* Greeks — hidden on mobile */}
+                      {(t.iv != null || t.delta != null || t.theta != null) && (
+                        <div className="hidden sm:flex gap-3 text-xs items-end">
+                          {t.iv    != null && <span className="text-zinc-500">IV <strong className="text-amber-400">{t.iv.toFixed(1)}%</strong></span>}
+                          {t.delta != null && <span className="text-zinc-500">Δ <strong className="text-zinc-200">{t.delta.toFixed(2)}</strong></span>}
+                          {t.theta != null && <span className="text-zinc-500">Θ <strong className="text-red-400">${t.theta.toFixed(2)}/d</strong></span>}
+                        </div>
+                      )}
                     </div>
                   </div>
 
