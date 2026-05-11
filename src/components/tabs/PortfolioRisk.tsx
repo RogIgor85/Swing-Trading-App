@@ -641,38 +641,24 @@ export default function PortfolioRisk() {
               Market Value and P&L shown in native currency; totals converted to CAD above.
             </p>
 
-            <div className="overflow-x-auto">
-              <table className="w-full">
+            <div>
+              <table className="w-full text-xs">
                 <thead>
                   <tr className="border-b border-zinc-800">
                     {([
-                      { label: 'Ticker',       key: 'ticker'        },
-                      { label: 'Account',      key: 'account'       },
-                      { label: 'Cur',          key: 'currency'      },
-                      { label: 'Shares',       key: 'shares'        },
-                      { label: 'Avg Cost',     key: 'avg_cost'      },
-                      { label: 'Current',      key: 'currentPrice'  },
-                      { label: 'Day %',        key: 'changePct'     },
-                      { label: 'Book Value',   key: 'costBasis'     },
-                      { label: 'Mkt Value',    key: 'marketValue'   },
-                      { label: 'P&L (native)', key: 'pnl'           },
-                      { label: 'Alloc %',      key: 'allocationPct' },
-                      { label: 'Sector',       key: 'sector'        },
-                      { label: 'Purchase Date',key: 'purchase_date' },
-                      { label: 'Sell Date',    key: 'sell_date'     },
+                      { label: 'Ticker / Sector', key: 'ticker'        },
+                      { label: 'Account',          key: 'account'       },
+                      { label: 'Qty / Avg Cost',   key: 'shares'        },
+                      { label: 'Price / Day %',    key: 'currentPrice'  },
+                      { label: 'Book → Mkt',       key: 'marketValue'   },
+                      { label: 'P&L',              key: 'pnl'           },
+                      { label: 'Alloc',            key: 'allocationPct' },
                     ] as { label: string; key: SortKey }[]).map(({ label, key }) => (
                       <th key={key} className="th">
-                        <button
-                          onClick={() => handleSort(key)}
-                          className="flex items-center gap-1 hover:text-zinc-100 transition-colors group whitespace-nowrap"
-                        >
+                        <button onClick={() => handleSort(key)} className="flex items-center gap-1 hover:text-zinc-100 transition-colors group whitespace-nowrap">
                           {label}
-                          <span className="text-zinc-600 group-hover:text-zinc-400 transition-colors">
-                            {sortKey === key
-                              ? sortDir === 'asc'
-                                ? <ChevronUp size={11} className="text-blue-400" />
-                                : <ChevronDown size={11} className="text-blue-400" />
-                              : <ChevronsUpDown size={11} />}
+                          <span className="text-zinc-600 group-hover:text-zinc-400">
+                            {sortKey === key ? (sortDir === 'asc' ? <ChevronUp size={11} className="text-blue-400" /> : <ChevronDown size={11} className="text-blue-400" />) : <ChevronsUpDown size={11} />}
                           </span>
                         </button>
                       </th>
@@ -683,122 +669,115 @@ export default function PortfolioRisk() {
                 <tbody className="divide-y divide-zinc-800">
                   {filtered.map((h) => (
                     <tr key={h.id} className="tr-hover">
-                      <td className="td">
-                        <button
-                          onClick={() => setSelectedTicker({ ticker: h.ticker, currency: h.currency })}
-                          className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 transition-colors flex items-center gap-1 group"
-                          title={`View fundamentals for ${h.ticker}`}
-                        >
-                          {h.ticker}
-                          <ExternalLink size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
-                        </button>
-                      </td>
-                      <td className="td"><span className={`text-xs font-semibold ${accountColors[h.account]}`}>{h.account}</span></td>
-                      <td className="td text-xs text-zinc-500">{h.currency}</td>
-                      <td className="td tabular-nums text-xs">{fmt(h.shares, 3)}</td>
-                      <td className="td tabular-nums">{fmtCurrency(h.avg_cost)}</td>
 
-                      {/* Manual-editable current price */}
-                      <td className="td tabular-nums">
-                        {editingPrice === h.ticker ? (
-                          <div className="flex items-center gap-1">
-                            <input
-                              ref={priceInputRef}
-                              type="number"
-                              step="0.0001"
-                              className="w-24 bg-zinc-700 border border-blue-500 rounded px-1.5 py-0.5 text-xs text-zinc-100 tabular-nums focus:outline-none"
-                              value={priceInput}
-                              onChange={(e) => setPriceInput(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') commitPrice(h.ticker);
-                                if (e.key === 'Escape') setEditingPrice(null);
-                              }}
-                            />
-                            <button onClick={() => commitPrice(h.ticker)} className="text-emerald-400 hover:text-emerald-300 p-0.5"><Check size={12} /></button>
-                            <button onClick={() => setEditingPrice(null)} className="text-zinc-500 hover:text-zinc-300 p-0.5"><X size={12} /></button>
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              onClick={() => startEditPrice(h.ticker, h.currentPrice)}
-                              className="group flex items-center gap-1 hover:text-blue-300 transition-colors"
-                              title={h.priceSource === 'cost' ? 'No live price — click to enter manually' : 'Click to override price'}
-                            >
-                              <span className={h.priceSource === 'cost' ? 'text-zinc-600' : ''}>{fmtCurrency(h.currentPrice)}</span>
-                              {h.priceSource === 'cost' && <span className="text-xs text-zinc-600">—</span>}
-                              <Pencil size={10} className="opacity-0 group-hover:opacity-60 text-zinc-400 transition-opacity" />
-                            </button>
-                            {h.priceSource === 'manual' && (
-                              <button
-                                onClick={() => clearManualPrice(h.ticker)}
-                                className="text-xs font-bold text-amber-500 hover:text-white hover:bg-amber-600 px-1 rounded transition-colors leading-none py-0.5"
-                                title="Manual override — click to restore auto price"
-                              >
-                                M ×
-                              </button>
-                            )}
+                      {/* Ticker + sector + dates */}
+                      <td className="td">
+                        <button onClick={() => setSelectedTicker({ ticker: h.ticker, currency: h.currency })}
+                          className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 flex items-center gap-1 group">
+                          {h.ticker}<ExternalLink size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
+                        </button>
+                        <div className="text-zinc-600 leading-tight">{h.sector}</div>
+                        {(h.purchase_date || h.sell_date) && (
+                          <div className="text-zinc-700 leading-tight tabular-nums">
+                            {h.purchase_date ?? '—'}{h.sell_date ? ` → ${h.sell_date}` : ''}
                           </div>
                         )}
                       </td>
 
-                      <td className={`td tabular-nums text-xs font-medium ${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-400'}`}>
-                        {h.priceSource === 'manual' ? <span className="text-zinc-600">—</span> : fmtPct(h.changePct)}
-                      </td>
-
-                      {/* Book Value = cost basis, native currency */}
-                      <td className="td tabular-nums text-sm">
-                        {fmtCurrency(h.costBasis)}
-                        <span className="text-xs text-zinc-600 ml-1">{h.currency}</span>
-                      </td>
-
-                      {/* Market value — native currency */}
-                      <td className="td tabular-nums font-medium text-sm">
-                        {fmtCurrency(h.marketValue)}
-                        <span className="text-xs text-zinc-600 ml-1">{h.currency}</span>
-                      </td>
-
-                      {/* P&L native */}
-                      <td className={`td tabular-nums font-medium ${h.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {h.pnl >= 0 ? '+' : ''}{fmtCurrency(h.pnl)}
-                        <br /><span className="text-xs">{fmtPct(h.pnlPct)}</span>
-                      </td>
-
+                      {/* Account + currency */}
                       <td className="td">
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 bg-zinc-700 rounded-full h-1.5 w-12">
-                            <div className="bg-blue-500 h-1.5 rounded-full" style={{ width: `${Math.min(h.allocationPct, 100)}%` }} />
-                          </div>
-                          <span className="tabular-nums text-xs">{fmt(h.allocationPct, 1)}%</span>
-                        </div>
+                        <span className={`font-semibold ${accountColors[h.account]}`}>{h.account}</span>
+                        <div className="text-zinc-600">{h.currency}</div>
                       </td>
-                      <td className="td text-xs text-zinc-400">{h.sector}</td>
-                      <td className="td text-xs text-zinc-400 tabular-nums whitespace-nowrap">{h.purchase_date ?? '—'}</td>
-                      <td className="td text-xs text-zinc-400 tabular-nums whitespace-nowrap">{h.sell_date ?? '—'}</td>
-                      <td className="td">
-                        {sellId === h.id ? (
-                          <div className="flex items-center gap-1 flex-wrap">
-                            <input type="number" step="0.0001" placeholder="Exit $" value={sellForm.exitPrice}
-                              onChange={(e) => setSellForm({ ...sellForm, exitPrice: e.target.value })}
-                              className="w-20 bg-zinc-700 border border-amber-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
-                            <input type="number" step="0.001" placeholder={`Qty (${h.shares})`} value={sellForm.qtySold}
-                              onChange={(e) => setSellForm({ ...sellForm, qtySold: e.target.value })}
-                              className="w-20 bg-zinc-700 border border-zinc-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
-                            <input type="date" value={sellForm.dateSold}
-                              onChange={(e) => setSellForm({ ...sellForm, dateSold: e.target.value })}
-                              className="w-28 bg-zinc-700 border border-zinc-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
-                            <button onClick={() => handleSell(h)} disabled={sellLoading}
-                              className="btn-primary text-xs px-2 py-1 flex items-center gap-1">
-                              <Check size={11} />{sellLoading ? '...' : 'Sell'}
-                            </button>
-                            <button onClick={() => setSellId(null)} className="btn-ghost p-1"><X size={11} /></button>
+
+                      {/* Qty + avg cost */}
+                      <td className="td tabular-nums text-right">
+                        <div>{fmt(h.shares, 3)} sh</div>
+                        <div className="text-zinc-500">{fmtCurrency(h.avg_cost)}</div>
+                      </td>
+
+                      {/* Current price (editable) + day % */}
+                      <td className="td tabular-nums text-right">
+                        {editingPrice === h.ticker ? (
+                          <div className="flex items-center gap-1 justify-end">
+                            <input ref={priceInputRef} type="number" step="0.0001"
+                              className="w-20 bg-zinc-700 border border-blue-500 rounded px-1.5 py-0.5 text-xs text-zinc-100 tabular-nums focus:outline-none"
+                              value={priceInput} onChange={(e) => setPriceInput(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === 'Enter') commitPrice(h.ticker); if (e.key === 'Escape') setEditingPrice(null); }} />
+                            <button onClick={() => commitPrice(h.ticker)} className="text-emerald-400 p-0.5"><Check size={12} /></button>
+                            <button onClick={() => setEditingPrice(null)} className="text-zinc-500 p-0.5"><X size={12} /></button>
                           </div>
                         ) : (
-                          <div className="flex gap-1">
+                          <div className="flex items-center gap-1 justify-end">
+                            <button onClick={() => startEditPrice(h.ticker, h.currentPrice)}
+                              className="group flex items-center gap-0.5 hover:text-blue-300 transition-colors"
+                              title={h.priceSource === 'cost' ? 'No live price — click to set manually' : 'Click to override'}>
+                              <span className={h.priceSource === 'cost' ? 'text-zinc-600' : ''}>{fmtCurrency(h.currentPrice)}</span>
+                              <Pencil size={9} className="opacity-0 group-hover:opacity-60 text-zinc-400 transition-opacity" />
+                            </button>
+                            {h.priceSource === 'manual' && (
+                              <button onClick={() => clearManualPrice(h.ticker)}
+                                className="text-[10px] font-bold text-amber-500 hover:text-white hover:bg-amber-600 px-1 rounded transition-colors leading-none py-0.5"
+                                title="Manual — click to restore auto">M×</button>
+                            )}
+                          </div>
+                        )}
+                        <div className={`${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-600'}`}>
+                          {h.priceSource === 'manual' ? '—' : fmtPct(h.changePct)}
+                        </div>
+                      </td>
+
+                      {/* Book → Market value */}
+                      <td className="td tabular-nums text-right">
+                        <div className="text-zinc-500">{fmtCurrency(h.costBasis)}</div>
+                        <div className="font-medium">{fmtCurrency(h.marketValue)} <span className="text-zinc-600">{h.currency}</span></div>
+                      </td>
+
+                      {/* P&L */}
+                      <td className={`td tabular-nums text-right font-medium ${h.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        <div>{h.pnl >= 0 ? '+' : ''}{fmtCurrency(h.pnl)}</div>
+                        <div className="font-normal">{fmtPct(h.pnlPct)}</div>
+                      </td>
+
+                      {/* Alloc % */}
+                      <td className="td">
+                        <div className="flex items-center gap-1.5 justify-end">
+                          <div className="w-10 bg-zinc-700 rounded-full h-1.5 flex-shrink-0">
+                            <div className="bg-blue-500 h-1.5 rounded-full" style={{ width: `${Math.min(h.allocationPct, 100)}%` }} />
+                          </div>
+                          <span className="tabular-nums">{fmt(h.allocationPct, 1)}%</span>
+                        </div>
+                      </td>
+
+                      {/* Actions */}
+                      <td className="td">
+                        {sellId === h.id ? (
+                          <div className="flex flex-col gap-1 min-w-0">
+                            <div className="flex gap-1">
+                              <input type="number" step="0.0001" placeholder="Exit $" value={sellForm.exitPrice}
+                                onChange={(e) => setSellForm({ ...sellForm, exitPrice: e.target.value })}
+                                className="w-20 bg-zinc-700 border border-amber-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
+                              <input type="number" step="0.001" placeholder={`Qty`} value={sellForm.qtySold}
+                                onChange={(e) => setSellForm({ ...sellForm, qtySold: e.target.value })}
+                                className="w-16 bg-zinc-700 border border-zinc-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
+                            </div>
+                            <div className="flex gap-1 items-center">
+                              <input type="date" value={sellForm.dateSold}
+                                onChange={(e) => setSellForm({ ...sellForm, dateSold: e.target.value })}
+                                className="w-28 bg-zinc-700 border border-zinc-600 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
+                              <button onClick={() => handleSell(h)} disabled={sellLoading} className="btn-primary text-xs px-2 py-1 flex items-center gap-1">
+                                <Check size={11} />{sellLoading ? '…' : 'Sell'}
+                              </button>
+                              <button onClick={() => setSellId(null)} className="btn-ghost p-1"><X size={11} /></button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex gap-1 justify-end">
                             <button onClick={() => { setSellId(h.id); setSellForm({ exitPrice: h.currentPrice.toFixed(2), qtySold: h.shares.toString(), dateSold: new Date().toISOString().split('T')[0] }); }}
                               className="text-xs px-2 py-1 rounded border border-amber-700 text-amber-400 hover:bg-amber-900/30 transition-colors font-medium">
                               Sell
                             </button>
-                            <button onClick={() => startEdit(h)} className="btn-ghost p-1" title="Edit holding"><Edit2 size={12} /></button>
+                            <button onClick={() => startEdit(h)} className="btn-ghost p-1" title="Edit"><Edit2 size={12} /></button>
                             <button onClick={() => handleDelete(h.id)} className="btn-danger" title="Delete"><Trash2 size={12} /></button>
                           </div>
                         )}
