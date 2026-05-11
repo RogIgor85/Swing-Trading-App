@@ -85,6 +85,37 @@ function fmtCAD(n: number) {
 }
 
 
+// Reusable date picker: styled button + hidden native input opened via showPicker()
+function DatePicker({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  const ref = useRef<HTMLInputElement>(null);
+  function open() {
+    try { ref.current?.showPicker(); } catch { ref.current?.click(); }
+  }
+  return (
+    <div className="w-36">
+      <label className="label">{label}</label>
+      <button
+        type="button"
+        onClick={open}
+        className="input-base w-full flex items-center justify-between gap-2 cursor-pointer hover:border-zinc-500 transition-colors"
+      >
+        <span className={value ? 'text-zinc-100 tabular-nums text-sm' : 'text-zinc-500 text-xs'}>
+          {value || 'Pick a date'}
+        </span>
+        <Calendar size={13} className="text-zinc-500 flex-shrink-0" />
+      </button>
+      <input
+        ref={ref}
+        type="date"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="sr-only"
+        tabIndex={-1}
+      />
+    </div>
+  );
+}
+
 export default function PortfolioRisk() {
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [livePrices, setLivePrices] = useState<Record<string, LivePrice>>({});
@@ -511,20 +542,8 @@ export default function PortfolioRisk() {
               <option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option>
             </select>
           </div>
-          <div className="w-36">
-            <label className="label">Purchase Date</label>
-            <div className="relative">
-              <input className="input-base pr-8" type="date" value={form.purchase_date} onChange={(e) => setForm({ ...form, purchase_date: e.target.value })} />
-              <Calendar size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
-            </div>
-          </div>
-          <div className="w-36">
-            <label className="label">Sell Date</label>
-            <div className="relative">
-              <input className="input-base pr-8" type="date" value={form.sell_date} onChange={(e) => setForm({ ...form, sell_date: e.target.value })} />
-              <Calendar size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
-            </div>
-          </div>
+          <DatePicker label="Purchase Date" value={form.purchase_date} onChange={(v) => setForm({ ...form, purchase_date: v })} />
+          <DatePicker label="Sell Date"     value={form.sell_date}     onChange={(v) => setForm({ ...form, sell_date: v })} />
           <div className="flex-1 min-w-28"><label className="label">Notes</label><input className="input-base" placeholder="Notes..." value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></div>
           <button type="submit" className="btn-primary flex items-center gap-2" disabled={loading}>
             {editId ? <Check size={14} /> : <Plus size={14} />}
