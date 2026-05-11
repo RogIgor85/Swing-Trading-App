@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, X, Check, Trash2, Pencil, ChevronDown, ChevronUp, Clock, AlertTriangle, Target, ExternalLink } from 'lucide-react';
+import { Plus, X, Check, Trash2, Pencil, ChevronDown, ChevronUp, Clock, AlertTriangle, Target, ExternalLink, ShieldAlert, Trophy } from 'lucide-react';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { fmtCurrency } from '../../lib/utils';
 import type { Account, Currency } from '../../types';
@@ -53,6 +53,43 @@ const STRATEGIES: OptionStrategy[] = [
   'LEAPS', 'Other',
 ];
 
+// ─── Golden Rules ─────────────────────────────────────────────────────────────
+const SELL_STRATEGIES: OptionStrategy[] = [
+  'Covered Call', 'Cash-Secured Put',
+  'Bull Put Spread', 'Bear Call Spread',
+  'Iron Condor', 'Iron Butterfly',
+];
+
+const GOLDEN_RULES = [
+  { num: '01', title: 'Never sell naked options', desc: 'Only buy options (Long Call / Long Put / LEAPS) unless you have the capital or shares to back a sell strategy.' },
+  { num: '02', title: 'Know your break-even before entering', desc: 'The stock must move beyond break-even by expiry for your trade to be profitable. Verify this before entry.' },
+  { num: '03', title: 'Take profit at +100%', desc: 'When the option doubles in value (current premium ≥ 2× paid), consider closing — do not get greedy.' },
+  { num: '04', title: 'Cut losses at −45%', desc: 'If the option loses ~45% of premium paid, exit to preserve capital rather than riding it to zero.' },
+  { num: '05', title: 'Watch DTE ≤ 7 — theta decay accelerates', desc: 'Inside one week to expiry, time decay is at its fastest. Re-evaluate or close the position.' },
+  { num: '06', title: 'Start with 1 contract', desc: 'Until you are consistently profitable, limit each trade to 1 contract to manage risk.' },
+];
+
+interface RuleAlert { rule: string; message: string; color: 'green' | 'red' | 'amber' }
+
+function getRuleAlerts(t: OptionTrade): RuleAlert[] {
+  const alerts: RuleAlert[] = [];
+  const cp = t.current_premium;
+
+  // Rule 03 — +100% profit target
+  if (cp != null && cp >= t.premium_paid * 2) {
+    alerts.push({ rule: '03', message: 'Up +100% — consider taking profit', color: 'green' });
+  }
+  // Rule 04 — −45% stop loss
+  if (cp != null && cp <= t.premium_paid * 0.55) {
+    alerts.push({ rule: '04', message: 'Down −45% — consider cutting loss', color: 'red' });
+  }
+  // Rule 05 — DTE ≤ 7
+  if (t.status === 'OPEN' && daysToExpiry(t.expiration) <= 7) {
+    alerts.push({ rule: '05', message: 'DTE ≤ 7 — theta decay accelerating', color: 'amber' });
+  }
+  return alerts;
+}
+
 const STATUS_COLORS: Record<OptionStatus, string> = {
   OPEN:     'bg-blue-900/40 text-blue-300 border border-blue-700',
   CLOSED:   'bg-zinc-800 text-zinc-400 border border-zinc-600',
@@ -97,9 +134,17 @@ function breakEven(t: OptionTrade): number {
 }
 
 function barchartUrl(ticker: string): string {
-  // TSX tickers end in .TO — Barchart uses the root symbol without suffix
   const clean = ticker.replace(/\.TO$/i, '');
   return `https://www.barchart.com/stocks/quotes/${clean}/options`;
+}
+
+// Build OCC option symbol for Massive API: O:AAPL260117C00200000
+function occSymbol(t: OptionTrade): string {
+  const root = t.underlying.replace(/\.TO$/i, '');
+  const [year, month, day] = t.expiration.split('-');
+  const cp = t.option_type === 'CALL' ? 'C' : 'P';
+  const strikePadded = Math.round(t.strike * 1000).toString().padStart(8, '0');
+  return `O:${root}${year.slice(2)}${month}${day}${cp}${strikePadded}`;
 }
 
 function fmt$(n: number) {
@@ -151,6 +196,16 @@ export default function OptionsTracker() {
   const [updateId, setUpdateId]   = useState<string | null>(null);
   const [updatePremium, setUpdatePremium] = useState('');
   const [error, setError]         = useState<string | null>(null);
+  const [rulesOpen, setRulesOpen] = useState(false);
+
+  // ── Massive API auto-pricing ───────────────────────────────────────────────
+  const [apiKey, setApiKey]           = useState<string>(() => localStorage.getItem('massive_api_key') ?? '');
+  const [apiKeyDraft, setApiKeyDraft] = useState('');
+  const [showKeyInput, setShowKeyInput] = useState(false);
+  const [livePrices, setLivePrices]   = useState<Record<string, number>>({});
+  const [fetchingPrices, setFetchingPrices] = useState(false);
+  const [lastRefreshed, setLastRefreshed]   = useState<string | null>(null);
+  const [priceErrors, setPriceErrors] = useState<Record<string, string>>({});
 
   async function load() {
     try {
@@ -161,12 +216,68 @@ export default function OptionsTracker() {
 
   useEffect(() => { load(); }, []);
 
+  // Apply live price override to a trade for P&L / alert calculations
+  function withLive(t: OptionTrade): OptionTrade {
+    return livePrices[t.id] != null ? { ...t, current_premium: livePrices[t.id] } : t;
+  }
+
+  // Save Massive API key to localStorage
+  function saveApiKey() {
+    const trimmed = apiKeyDraft.trim();
+    localStorage.setItem('massive_api_key', trimmed);
+    setApiKey(trimmed);
+    setApiKeyDraft('');
+    setShowKeyInput(false);
+  }
+
+  // Fetch live option premiums from Massive API for all open trades
+  async function fetchAllPrices() {
+    if (!apiKey) return;
+    setFetchingPrices(true);
+    const openTrades = trades.filter(t => t.status === 'OPEN');
+    const results: Record<string, number> = {};
+    const errors: Record<string, string> = {};
+
+    await Promise.allSettled(openTrades.map(async t => {
+      try {
+        const sym  = occSymbol(t);
+        const root = t.underlying.replace(/\.TO$/i, '');
+        const res  = await fetch(
+          `https://api.massive.com/v3/snapshot/options/${root}/${sym}`,
+          { headers: { Authorization: `Bearer ${apiKey}` } },
+        );
+        if (res.status === 401) { errors[t.id] = 'Invalid API key'; return; }
+        if (res.status === 404) { errors[t.id] = 'Contract not found'; return; }
+        if (!res.ok) { errors[t.id] = `HTTP ${res.status}`; return; }
+        const d = await res.json();
+        const q  = d.results?.last_quote;
+        const price =
+          q?.midpoint ??
+          (q?.bid != null && q?.ask != null ? (q.bid + q.ask) / 2 : null) ??
+          d.results?.last_trade?.price ?? null;
+        if (price != null) results[t.id] = price;
+        else errors[t.id] = 'No price data';
+      } catch {
+        errors[t.id] = 'Network error';
+      }
+    }));
+
+    setLivePrices(prev => ({ ...prev, ...results }));
+    setPriceErrors(errors);
+    setLastRefreshed(new Date().toLocaleTimeString());
+    setFetchingPrices(false);
+  }
+
+  // Auto-fetch when key is set and trades finish loading
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (apiKey && !loading) fetchAllPrices(); }, [apiKey, loading]);
+
   // ── Summary stats ──────────────────────────────────────────────────────────
   const open   = trades.filter(t => t.status === 'OPEN');
   const closed = trades.filter(t => t.status !== 'OPEN');
 
   const totalAtRisk     = open.reduce((s, t) => s + totalCost(t), 0);
-  const totalUnrealized = open.reduce((s, t) => s + (unrealizedPnl(t) ?? 0), 0);
+  const totalUnrealized = open.reduce((s, t) => s + (unrealizedPnl(withLive(t)) ?? 0), 0);
   const totalRealized   = closed.reduce((s, t) => s + (realizedPnl(t) ?? 0), 0);
   const wins   = closed.filter(t => (realizedPnl(t) ?? 0) > 0).length;
   const winRate = closed.length > 0 ? (wins / closed.length) * 100 : null;
@@ -289,6 +400,32 @@ export default function OptionsTracker() {
 
   return (
     <div className="space-y-5">
+
+      {/* ── Golden Rules panel ─────────────────────────────────────────────── */}
+      <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 overflow-hidden">
+        <button
+          onClick={() => setRulesOpen(o => !o)}
+          className="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-amber-950/30 transition-colors"
+        >
+          <Trophy size={14} className="text-amber-400 flex-shrink-0" />
+          <span className="text-sm font-semibold text-amber-300">Golden Rules of Options Trading</span>
+          <span className="text-xs text-amber-700 ml-1">— live alerts are active on every trade</span>
+          <span className="ml-auto text-amber-600">{rulesOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</span>
+        </button>
+        {rulesOpen && (
+          <div className="border-t border-amber-800/40 px-4 py-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {GOLDEN_RULES.map(r => (
+              <div key={r.num} className="flex gap-2.5 text-xs">
+                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-amber-900/60 border border-amber-700 text-amber-300 flex items-center justify-center font-bold text-[10px]">{r.num}</span>
+                <div>
+                  <div className="font-semibold text-amber-200 mb-0.5">{r.title}</div>
+                  <div className="text-zinc-500 leading-relaxed">{r.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* ── Summary ────────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
@@ -413,6 +550,20 @@ export default function OptionsTracker() {
               </div>
             </div>
 
+            {/* ── Golden Rule warnings ── */}
+            {form.strategy && SELL_STRATEGIES.includes(form.strategy as OptionStrategy) && (
+              <div className="flex items-start gap-2 bg-red-950/40 border border-red-800/60 rounded-lg px-3 py-2 text-xs text-red-300">
+                <ShieldAlert size={13} className="flex-shrink-0 mt-0.5 text-red-400" />
+                <span><strong className="text-red-200">Rule 01 — Selling strategy detected.</strong> "{form.strategy}" requires you to own the underlying shares or have sufficient cash to take assignment. Make sure you have the capital or shares to back this position.</span>
+              </div>
+            )}
+            {(form.contracts ?? 1) > 1 && (
+              <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-800/60 rounded-lg px-3 py-2 text-xs text-amber-300">
+                <ShieldAlert size={13} className="flex-shrink-0 mt-0.5 text-amber-400" />
+                <span><strong className="text-amber-200">Rule 06 — Multiple contracts.</strong> Until consistently profitable, consider limiting to 1 contract. You have entered <strong>{form.contracts}</strong> contracts (capital at risk: {fmt$(Number(form.premium_paid || 0) * Number(form.contracts) * 100)}).</span>
+              </div>
+            )}
+
             {/* Cost summary */}
             {form.premium_paid && form.contracts && (
               <div className="flex gap-6 text-xs text-zinc-500 bg-zinc-900/60 rounded-lg px-4 py-2 border border-zinc-800">
@@ -453,6 +604,41 @@ export default function OptionsTracker() {
           <h2 className="text-base font-semibold text-zinc-100 mr-auto">
             Positions <span className="text-zinc-600 text-sm font-normal">({filtered.length})</span>
           </h2>
+
+          {/* ── Auto-pricing controls ── */}
+          <div className="flex items-center gap-2">
+            {apiKey ? (
+              <>
+                {lastRefreshed && (
+                  <span className="text-xs text-zinc-600">Live · {lastRefreshed}</span>
+                )}
+                <button
+                  onClick={fetchAllPrices}
+                  disabled={fetchingPrices}
+                  className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border border-emerald-800 text-emerald-400 hover:bg-emerald-900/30 transition-colors disabled:opacity-50"
+                  title="Refresh live option premiums from Massive"
+                >
+                  <Clock size={11} className={fetchingPrices ? 'animate-spin' : ''} />
+                  {fetchingPrices ? 'Fetching…' : 'Refresh'}
+                </button>
+                <button
+                  onClick={() => setShowKeyInput(v => !v)}
+                  className="text-xs px-2 py-1 rounded-lg border border-zinc-700 text-zinc-500 hover:text-zinc-300 hover:border-zinc-500 transition-colors"
+                  title="Change API key"
+                >
+                  🔑
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => setShowKeyInput(v => !v)}
+                className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border border-zinc-700 text-zinc-400 hover:text-emerald-400 hover:border-emerald-700 transition-colors"
+              >
+                🔑 Enable auto-pricing
+              </button>
+            )}
+          </div>
+
           {/* Status filter */}
           <div className="flex gap-1">
             {(['ALL', 'OPEN', 'CLOSED', 'EXPIRED', 'ASSIGNED'] as const).map(s => (
@@ -468,6 +654,30 @@ export default function OptionsTracker() {
           </div>
         </div>
 
+        {/* ── API key input ── */}
+        {showKeyInput && (
+          <div className="flex items-center gap-2 mb-4 p-3 rounded-lg bg-zinc-900/60 border border-zinc-700">
+            <span className="text-xs text-zinc-400 flex-shrink-0">Massive API Key:</span>
+            <input
+              type="password"
+              className="flex-1 bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:border-blue-500"
+              placeholder={apiKey ? '••••••••••••••••' : 'Paste your key from massive.com/dashboard'}
+              value={apiKeyDraft}
+              onChange={e => setApiKeyDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') saveApiKey(); if (e.key === 'Escape') setShowKeyInput(false); }}
+              autoFocus
+            />
+            <button onClick={saveApiKey} className="btn-primary text-xs px-3 py-1" disabled={!apiKeyDraft.trim()}>Save</button>
+            {apiKey && (
+              <button onClick={() => { localStorage.removeItem('massive_api_key'); setApiKey(''); setLivePrices({}); setShowKeyInput(false); }}
+                className="text-xs text-red-400 hover:text-red-300 px-2 py-1">
+                Remove
+              </button>
+            )}
+            <button onClick={() => setShowKeyInput(false)} className="text-zinc-600 hover:text-zinc-300"><X size={13} /></button>
+          </div>
+        )}
+
         {filtered.length === 0 ? (
           <div className="text-center py-10 text-zinc-600">
             <Target size={32} className="mx-auto mb-3 opacity-30" />
@@ -476,12 +686,15 @@ export default function OptionsTracker() {
         ) : (
           <div className="space-y-3">
             {filtered.map(t => {
-              const dte   = daysToExpiry(t.expiration);
-              const pnl   = t.status === 'OPEN' ? unrealizedPnl(t) : realizedPnl(t);
-              const cost  = totalCost(t);
+              const et     = withLive(t);                  // trade with live price applied
+              const isLive = livePrices[t.id] != null;
+              const dte    = daysToExpiry(t.expiration);
+              const pnl    = t.status === 'OPEN' ? unrealizedPnl(et) : realizedPnl(et);
+              const cost   = totalCost(t);
               const pnlPct = pnl != null ? (pnl / cost) * 100 : null;
               const isExpanded = expandId === t.id;
               const dteColor = dte <= 7 ? 'text-red-400' : dte <= 21 ? 'text-amber-400' : 'text-zinc-400';
+              const alerts = t.status === 'OPEN' ? getRuleAlerts(et) : [];
 
               return (
                 <div key={t.id} className={`rounded-lg border transition-colors ${
@@ -489,6 +702,22 @@ export default function OptionsTracker() {
                     ? (pnl != null && pnl >= 0 ? 'border-emerald-800/60 bg-emerald-950/10' : 'border-zinc-800 bg-zinc-800/30')
                     : 'border-zinc-800/50 bg-zinc-900/20'
                 }`}>
+                  {/* ── Rule alert badges ── */}
+                  {alerts.length > 0 && (
+                    <div className="flex flex-wrap gap-2 px-4 pt-3 pb-0">
+                      {alerts.map(a => (
+                        <span key={a.rule} className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-medium border ${
+                          a.color === 'green' ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700' :
+                          a.color === 'red'   ? 'bg-red-950/60 text-red-300 border-red-700' :
+                                               'bg-amber-950/60 text-amber-300 border-amber-700'
+                        }`}>
+                          <Trophy size={10} className={a.color === 'green' ? 'text-emerald-400' : a.color === 'red' ? 'text-red-400' : 'text-amber-400'} />
+                          <span className="font-bold">Rule {a.rule}</span> — {a.message}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
                   {/* ── Main row ── */}
                   <div className="flex items-center gap-3 p-4 flex-wrap">
 
@@ -540,7 +769,12 @@ export default function OptionsTracker() {
                     {/* Current option premium (editable for open) */}
                     {t.status === 'OPEN' && (
                       <div className="flex-shrink-0">
-                        <div className="text-xs text-zinc-500">Option Premium</div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs text-zinc-500">Option Premium</span>
+                          {isLive && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-900/60 text-emerald-400 border border-emerald-800 font-semibold leading-none">LIVE</span>
+                          )}
+                        </div>
                         {updateId === t.id ? (
                           <div className="flex items-center gap-1">
                             <input
@@ -557,27 +791,32 @@ export default function OptionsTracker() {
                           </div>
                         ) : (
                           <button
-                            onClick={() => { setUpdateId(t.id); setUpdatePremium(t.current_premium?.toString() ?? ''); }}
-                            className="text-sm font-mono text-blue-400 hover:text-blue-300 transition-colors"
-                            title="Enter the option's current bid/ask premium (per share) — NOT the stock price"
+                            onClick={() => { setUpdateId(t.id); setUpdatePremium((et.current_premium ?? t.current_premium)?.toString() ?? ''); }}
+                            className={`text-sm font-mono transition-colors ${isLive ? 'text-emerald-400 hover:text-emerald-300' : 'text-blue-400 hover:text-blue-300'}`}
+                            title={isLive ? 'Live mid-price from Massive API (click to override manually)' : 'Enter the option\'s current bid/ask premium (per share) — NOT the stock price'}
                           >
-                            {t.current_premium != null ? `$${t.current_premium.toFixed(2)}/sh` : <span className="text-zinc-600 text-xs italic">set option premium</span>}
+                            {et.current_premium != null
+                              ? `$${et.current_premium.toFixed(2)}/sh`
+                              : <span className="text-zinc-600 text-xs italic">set option premium</span>}
                           </button>
                         )}
-                        <div className="text-zinc-700 text-xs mt-0.5">option price, not stock</div>
+                        {priceErrors[t.id] && !isLive && (
+                          <div className="text-[10px] text-amber-600 mt-0.5">{priceErrors[t.id]}</div>
+                        )}
+                        {!isLive && <div className="text-zinc-700 text-xs mt-0.5">option price, not stock</div>}
                       </div>
                     )}
 
                     {/* P&L — only shown when current option premium is set */}
                     <div className="flex-shrink-0">
                       <div className="text-xs text-zinc-500">{t.status === 'OPEN' ? 'Unrealized' : 'Realized'} P&L</div>
-                      {pnl != null && (t.status !== 'OPEN' || t.current_premium != null) ? (
+                      {pnl != null && (t.status !== 'OPEN' || et.current_premium != null) ? (
                         <div className={`text-sm font-bold tabular-nums ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                           {fmtPnl(pnl)}
                           {pnlPct != null && <span className="text-xs ml-1 font-normal">({pnl >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%)</span>}
                         </div>
                       ) : (
-                        <div className="text-xs text-zinc-600">{t.status === 'OPEN' ? 'set option premium →' : '—'}</div>
+                        <div className="text-xs text-zinc-600">{t.status === 'OPEN' ? (apiKey ? 'fetching…' : 'set option premium →') : '—'}</div>
                       )}
                     </div>
 
