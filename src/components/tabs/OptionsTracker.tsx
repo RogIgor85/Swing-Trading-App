@@ -243,8 +243,7 @@ export default function OptionsTracker() {
         const sym  = occSymbol(t);
         const root = t.underlying.replace(/\.TO$/i, '');
         const res  = await fetch(
-          `https://api.massive.com/v3/snapshot/options/${root}/${sym}`,
-          { headers: { Authorization: `Bearer ${apiKey}` } },
+          `https://api.massive.com/v3/snapshot/options/${root}/${sym}?apiKey=${apiKey}`,
         );
         if (res.status === 401) { errors[t.id] = 'Invalid API key'; return; }
         if (res.status === 404) { errors[t.id] = 'Contract not found'; return; }
