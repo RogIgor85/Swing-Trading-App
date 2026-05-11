@@ -242,10 +242,20 @@ export default function OptionsTracker() {
       try {
         const sym  = occSymbol(t);
         const root = t.underlying.replace(/\.TO$/i, '');
-        const res  = await fetch(
-          `https://api.massive.com/v3/snapshot/options/${root}/${sym}?apiKey=${apiKey}`,
-        );
-        if (res.status === 401) { errors[t.id] = 'Invalid API key'; return; }
+        // Try Massive first, fall back to Polygon (same API, transition period)
+        let res = await fetch(
+          `https://api.massive.com/v3/snapshot/options/${root}/${sym}`,
+          { headers: { Authorization: `Bearer ${apiKey}` } },
+        ).catch(() => null);
+        if (!res || res.status === 401 || res.status === 403) {
+          res = await fetch(
+            `https://api.polygon.io/v3/snapshot/options/${root}/${sym}`,
+            { headers: { Authorization: `Bearer ${apiKey}` } },
+          ).catch(() => null);
+        }
+        if (!res) { errors[t.id] = 'Network error'; return; }
+        if (res.status === 401 || res.status === 403) { errors[t.id] = 'Invalid API key'; return; }
+        if (res.status === 403) { errors[t.id] = 'Plan does not include options'; return; }
         if (res.status === 404) { errors[t.id] = 'Contract not found'; return; }
         if (!res.ok) { errors[t.id] = `HTTP ${res.status}`; return; }
         const d = await res.json();
