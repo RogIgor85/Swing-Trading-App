@@ -677,11 +677,9 @@ export default function PortfolioRisk() {
                           {h.ticker}<ExternalLink size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
                         </button>
                         <div className="text-zinc-600 leading-tight">{h.sector}</div>
-                        {(h.purchase_date || h.sell_date) && (
-                          <div className="text-zinc-700 leading-tight tabular-nums">
-                            {h.purchase_date ?? '—'}{h.sell_date ? ` → ${h.sell_date}` : ''}
-                          </div>
-                        )}
+                        <div className="text-zinc-400 leading-tight tabular-nums mt-0.5">
+                          📅 {h.purchase_date ?? '—'}{h.sell_date ? ` → ${h.sell_date}` : ''}
+                        </div>
                       </td>
 
                       {/* Account + currency */}
