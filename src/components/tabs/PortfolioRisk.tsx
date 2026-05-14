@@ -518,45 +518,51 @@ export default function PortfolioRisk() {
             </button>
           )}
         </div>
-        <form onSubmit={handleSubmit} className="flex flex-wrap gap-3 items-end">
-          <div className="w-20"><label className="label">Ticker *</label><input className="input-base uppercase" placeholder="AAPL" value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value })} required /></div>
-          <div className="w-24"><label className="label">Shares *</label><input className="input-base" type="number" step="0.001" placeholder="100" value={form.shares} onChange={(e) => setForm({ ...form, shares: e.target.value })} required /></div>
-          <div className="w-28"><label className="label">Avg Cost *</label><input className="input-base" type="number" step="0.0001" placeholder="150.00" value={form.avg_cost} onChange={(e) => setForm({ ...form, avg_cost: e.target.value })} required /></div>
-          <div className="w-28">
-            <label className="label flex items-center gap-1"><Target size={11} className="text-amber-400" /> Sell Target</label>
-            <input className="input-base" type="number" step="0.01" placeholder="200.00" value={form.target_price} onChange={(e) => setForm({ ...form, target_price: e.target.value })} />
+        <form onSubmit={handleSubmit} className="space-y-3">
+          {/* Row 1 — core position fields */}
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="w-20"><label className="label">Ticker *</label><input className="input-base uppercase" placeholder="AAPL" value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value })} required /></div>
+            <div className="w-24"><label className="label">Shares *</label><input className="input-base" type="number" step="0.001" placeholder="100" value={form.shares} onChange={(e) => setForm({ ...form, shares: e.target.value })} required /></div>
+            <div className="w-28"><label className="label">Avg Cost *</label><input className="input-base" type="number" step="0.0001" placeholder="150.00" value={form.avg_cost} onChange={(e) => setForm({ ...form, avg_cost: e.target.value })} required /></div>
+            <div className="w-28">
+              <label className="label flex items-center gap-1"><Target size={11} className="text-amber-400" /> Sell Target</label>
+              <input className="input-base" type="number" step="0.01" placeholder="200.00" value={form.target_price} onChange={(e) => setForm({ ...form, target_price: e.target.value })} />
+            </div>
+            <DatePicker label="Purchase Date" value={form.purchase_date} onChange={(v) => setForm({ ...form, purchase_date: v })} />
+            <DatePicker label="Sell Date"     value={form.sell_date}     onChange={(v) => setForm({ ...form, sell_date: v })} />
           </div>
-          <div className="w-28">
-            <label className="label">Account</label>
-            <select className="select-base" value={form.account} onChange={(e) => setForm({ ...form, account: e.target.value as Account })}>
-              {ACCOUNTS.map((a) => <option key={a}>{a}</option>)}
-            </select>
+          {/* Row 2 — classification + notes + submit */}
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="w-28">
+              <label className="label">Account</label>
+              <select className="select-base" value={form.account} onChange={(e) => setForm({ ...form, account: e.target.value as Account })}>
+                {ACCOUNTS.map((a) => <option key={a}>{a}</option>)}
+              </select>
+            </div>
+            <div className="w-20">
+              <label className="label">Currency</label>
+              <select className="select-base" value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value as Currency })}>
+                {CURRENCIES.map((c) => <option key={c}>{c}</option>)}
+              </select>
+            </div>
+            <div className="w-40">
+              <label className="label">Sector</label>
+              <select className="select-base" value={form.sector} onChange={(e) => setForm({ ...form, sector: e.target.value })}>
+                {SECTORS.map((s) => <option key={s}>{s}</option>)}
+              </select>
+            </div>
+            <div className="w-28">
+              <label className="label">Liquidity Risk</label>
+              <select className="select-base" value={form.liquidity_risk} onChange={(e) => setForm({ ...form, liquidity_risk: e.target.value as LiquidityRisk })}>
+                <option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option>
+              </select>
+            </div>
+            <div className="flex-1 min-w-[7rem]"><label className="label">Notes</label><input className="input-base" placeholder="Notes..." value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></div>
+            <button type="submit" className="btn-primary flex items-center gap-2 self-end" disabled={loading}>
+              {editId ? <Check size={14} /> : <Plus size={14} />}
+              {loading ? 'Saving...' : editId ? 'Update' : 'Add'}
+            </button>
           </div>
-          <div className="w-20">
-            <label className="label">Currency</label>
-            <select className="select-base" value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value as Currency })}>
-              {CURRENCIES.map((c) => <option key={c}>{c}</option>)}
-            </select>
-          </div>
-          <div className="w-40">
-            <label className="label">Sector</label>
-            <select className="select-base" value={form.sector} onChange={(e) => setForm({ ...form, sector: e.target.value })}>
-              {SECTORS.map((s) => <option key={s}>{s}</option>)}
-            </select>
-          </div>
-          <div className="w-28">
-            <label className="label">Liquidity Risk</label>
-            <select className="select-base" value={form.liquidity_risk} onChange={(e) => setForm({ ...form, liquidity_risk: e.target.value as LiquidityRisk })}>
-              <option value="LOW">LOW</option><option value="MEDIUM">MEDIUM</option><option value="HIGH">HIGH</option>
-            </select>
-          </div>
-          <DatePicker label="Purchase Date" value={form.purchase_date} onChange={(v) => setForm({ ...form, purchase_date: v })} />
-          <DatePicker label="Sell Date"     value={form.sell_date}     onChange={(v) => setForm({ ...form, sell_date: v })} />
-          <div className="flex-1 min-w-28"><label className="label">Notes</label><input className="input-base" placeholder="Notes..." value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></div>
-          <button type="submit" className="btn-primary flex items-center gap-2" disabled={loading}>
-            {editId ? <Check size={14} /> : <Plus size={14} />}
-            {loading ? 'Saving...' : editId ? 'Update' : 'Add'}
-          </button>
         </form>
       </div>
 
@@ -760,7 +766,7 @@ export default function PortfolioRisk() {
                           </div>
                         )}
                         <div className={`${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-600'}`}>
-                          {h.priceSource === 'manual' ? '—' : fmtPct(h.changePct)}
+                          {h.priceSource !== 'live' ? '—' : fmtPct(h.changePct)}
                         </div>
                         {h.target_price != null && (() => {
                           const upsidePct = h.currentPrice > 0 ? ((h.target_price - h.currentPrice) / h.currentPrice) * 100 : 0;
