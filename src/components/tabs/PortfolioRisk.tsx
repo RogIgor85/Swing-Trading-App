@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle, ExternalLink, ChevronUp, ChevronDown, ChevronsUpDown, Calendar } from 'lucide-react';
+import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle, ExternalLink, ChevronUp, ChevronDown, ChevronsUpDown, Calendar, Target } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
@@ -69,6 +69,7 @@ const defaultForm = {
   notes: '',
   purchase_date: '',
   sell_date: '',
+  target_price: '',
 };
 
 interface LivePrice { price: number; changePct: number; prevClose: number }
@@ -259,6 +260,7 @@ export default function PortfolioRisk() {
           notes: form.notes,
           purchase_date: form.purchase_date || null,
           sell_date: form.sell_date || null,
+          target_price: form.target_price ? parseFloat(form.target_price) : null,
           created_at: nowIso(),
         };
         await storage.update(TABLE, editId, holding);
@@ -289,6 +291,7 @@ export default function PortfolioRisk() {
             notes: form.notes,
             purchase_date: form.purchase_date || null,
             sell_date: form.sell_date || null,
+            target_price: form.target_price ? parseFloat(form.target_price) : null,
             created_at: nowIso(),
           };
           await storage.insert(TABLE, holding);
@@ -314,6 +317,7 @@ export default function PortfolioRisk() {
       notes: h.notes,
       purchase_date: h.purchase_date ?? '',
       sell_date: h.sell_date ?? '',
+      target_price: h.target_price?.toString() ?? '',
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
@@ -518,6 +522,10 @@ export default function PortfolioRisk() {
           <div className="w-20"><label className="label">Ticker *</label><input className="input-base uppercase" placeholder="AAPL" value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value })} required /></div>
           <div className="w-24"><label className="label">Shares *</label><input className="input-base" type="number" step="0.001" placeholder="100" value={form.shares} onChange={(e) => setForm({ ...form, shares: e.target.value })} required /></div>
           <div className="w-28"><label className="label">Avg Cost *</label><input className="input-base" type="number" step="0.0001" placeholder="150.00" value={form.avg_cost} onChange={(e) => setForm({ ...form, avg_cost: e.target.value })} required /></div>
+          <div className="w-28">
+            <label className="label flex items-center gap-1"><Target size={11} className="text-amber-400" /> Sell Target</label>
+            <input className="input-base" type="number" step="0.01" placeholder="200.00" value={form.target_price} onChange={(e) => setForm({ ...form, target_price: e.target.value })} />
+          </div>
           <div className="w-28">
             <label className="label">Account</label>
             <select className="select-base" value={form.account} onChange={(e) => setForm({ ...form, account: e.target.value as Account })}>
@@ -754,6 +762,20 @@ export default function PortfolioRisk() {
                         <div className={`${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-600'}`}>
                           {h.priceSource === 'manual' ? '—' : fmtPct(h.changePct)}
                         </div>
+                        {h.target_price != null && (() => {
+                          const upsidePct = h.currentPrice > 0 ? ((h.target_price - h.currentPrice) / h.currentPrice) * 100 : 0;
+                          const hit = h.currentPrice >= h.target_price;
+                          return (
+                            <div className="flex items-center gap-1 mt-0.5">
+                              <Target size={9} className={hit ? 'text-emerald-400' : 'text-amber-500'} />
+                              <span className="text-amber-400 tabular-nums">{fmtCurrency(h.target_price)}</span>
+                              <span className={`text-[10px] ${upsidePct >= 0 ? 'text-emerald-500' : 'text-red-400'}`}>
+                                {upsidePct >= 0 ? '+' : ''}{upsidePct.toFixed(1)}%
+                              </span>
+                              {hit && <span className="text-[10px] font-bold text-emerald-400">✓HIT</span>}
+                            </div>
+                          );
+                        })()}
                       </td>
 
                       {/* Book → Market value */}

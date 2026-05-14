@@ -67,6 +67,7 @@ export interface Holding {
   notes: string;
   purchase_date: string | null;
   sell_date: string | null;
+  target_price: number | null;
   created_at: string;
 }
 
