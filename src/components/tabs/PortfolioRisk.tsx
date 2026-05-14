@@ -10,6 +10,7 @@ import FundamentalsDrawer from '../FundamentalsDrawer';
 import type { Holding, LiquidityRisk, Account, Currency } from '../../types';
 
 const MANUAL_PRICES_KEY  = 'swing_manual_prices';
+const LIVE_PRICES_KEY    = 'swing_live_prices';
 const DAILY_CHANGE_KEY   = 'swing_daily_change';
 
 interface DailyChangeSnapshot {
@@ -209,6 +210,13 @@ export default function PortfolioRisk() {
       } catch { /* give up */ }
     });
   }, [holdings]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist live prices to localStorage so Net Worth tab can read them
+  useEffect(() => {
+    if (Object.keys(livePrices).length > 0) {
+      localStorage.setItem(LIVE_PRICES_KEY, JSON.stringify(livePrices));
+    }
+  }, [livePrices]);
 
   useEffect(() => {
     if (editingPrice) priceInputRef.current?.focus();

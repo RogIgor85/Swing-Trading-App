@@ -100,9 +100,13 @@ export default function NetWorth() {
       const manualPrices: Record<string, number> = (() => {
         try { return JSON.parse(localStorage.getItem('swing_manual_prices') ?? '{}'); } catch { return {}; }
       })();
+      const livePrices: Record<string, { price: number }> = (() => {
+        try { return JSON.parse(localStorage.getItem('swing_live_prices') ?? '{}'); } catch { return {}; }
+      })();
       const map: Record<string, number> = {};
       holdings.forEach(h => {
-        const price    = manualPrices[h.ticker] ?? h.avg_cost;
+        // Same priority as Portfolio tab: manual → live → avg_cost
+        const price    = manualPrices[h.ticker] ?? livePrices[h.ticker]?.price ?? h.avg_cost;
         const valueCAD = h.shares * price * (h.currency === 'USD' ? usdCadRate : 1);
         map[h.account] = (map[h.account] ?? 0) + valueCAD;
       });
@@ -248,7 +252,7 @@ export default function NetWorth() {
                         <td className="td tabular-nums text-right text-sm text-zinc-100">{fmt$(pa.valueCAD)}</td>
                         <td className="td text-right text-zinc-600">—</td>
                         <td className="td tabular-nums text-right text-sm font-medium text-emerald-400">{fmt$(pa.valueCAD)}</td>
-                        <td className="td text-xs text-zinc-700 text-right">cost basis</td>
+                        <td className="td text-xs text-zinc-700 text-right">mkt value</td>
                       </tr>
                     ))
                   )}
