@@ -721,7 +721,7 @@ export default function PortfolioRisk() {
                 </thead>
                 <tbody className="divide-y divide-zinc-800">
                   {filtered.map((h) => (
-                    <tr key={h.id} className="tr-hover">
+                    <tr key={h.id} className={`tr-hover ${h.target_price != null && h.currentPrice >= h.target_price ? 'bg-emerald-950/40 border-l-2 border-l-emerald-500' : ''}`}>
 
                       {/* Ticker + sector + dates */}
                       <td className="td">
