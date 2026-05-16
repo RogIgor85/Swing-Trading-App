@@ -743,7 +743,7 @@ export default function PortfolioRisk() {
 
                       {/* Qty + avg cost */}
                       <td className="td tabular-nums text-right">
-                        <div>{fmt(h.shares, 3)} sh</div>
+                        <div>{fmt(h.shares, 0)} sh</div>
                         <div className="text-zinc-500">{fmtCurrency(h.avg_cost)}</div>
                       </td>
 
