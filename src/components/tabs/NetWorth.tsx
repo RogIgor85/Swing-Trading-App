@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Plus, Trash2, Check, X, Pencil, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Plus, Trash2, Check, X, Pencil, RefreshCw, Target } from 'lucide-react';
 import { storage, newId, nowIso } from '../../lib/storage';
 import type { Holding } from '../../types';
 
@@ -83,6 +83,25 @@ export default function NetWorth() {
   const [portfolioAccounts, setPortfolioAccounts] = useState<PortfolioAccount[]>([]);
   const [usdCadRate, setUsdCadRate] = useState(1.38);
   const [syncing, setSyncing]   = useState(false);
+
+  // ── Net Worth Goal ──────────────────────────────────────────────────────
+  const [goal, setGoal]           = useState<number>(() => {
+    try { return parseFloat(localStorage.getItem('swing_nw_goal') ?? '0') || 0; } catch { return 0; }
+  });
+  const [editingGoal, setEditingGoal] = useState(false);
+  const [goalInput, setGoalInput]     = useState('');
+  const goalInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (editingGoal) goalInputRef.current?.focus(); }, [editingGoal]);
+
+  function commitGoal() {
+    const v = parseFloat(goalInput.replace(/,/g, ''));
+    if (!isNaN(v) && v >= 0) {
+      setGoal(v);
+      localStorage.setItem('swing_nw_goal', String(v));
+    }
+    setEditingGoal(false);
+  }
 
   // ── Load from Supabase on mount ─────────────────────────────────────────
   useEffect(() => {
@@ -385,6 +404,70 @@ export default function NetWorth() {
               {fmt$(totalAssets, false)} − {fmt$(totalDebt, false)}
             </div>
           </div>
+        </div>
+
+        {/* ── Goal tracker ── */}
+        <div className="mt-5 pt-4 border-t border-blue-900/60">
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <Target size={13} className="text-amber-400" />
+              <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wide">Net Worth Goal</span>
+            </div>
+            {editingGoal ? (
+              <div className="flex items-center gap-1">
+                <span className="text-xs text-zinc-500">$</span>
+                <input
+                  ref={goalInputRef}
+                  type="number"
+                  step="10000"
+                  placeholder="1000000"
+                  className="w-36 bg-zinc-800 border border-amber-500 rounded px-2 py-0.5 text-xs text-zinc-100 tabular-nums focus:outline-none"
+                  value={goalInput}
+                  onChange={e => setGoalInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') commitGoal(); if (e.key === 'Escape') setEditingGoal(false); }}
+                />
+                <button onClick={commitGoal} className="text-emerald-400 p-0.5"><Check size={13} /></button>
+                <button onClick={() => setEditingGoal(false)} className="text-zinc-500 p-0.5"><X size={13} /></button>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setGoalInput(goal > 0 ? String(goal) : ''); setEditingGoal(true); }}
+                className="group flex items-center gap-1.5 text-xs text-zinc-400 hover:text-amber-300 transition-colors"
+              >
+                <span className="tabular-nums font-semibold">{goal > 0 ? fmt$(goal, false) : 'Set a goal…'}</span>
+                <Pencil size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
+              </button>
+            )}
+          </div>
+          {goal > 0 && (() => {
+            const pct     = Math.min((netWorth / goal) * 100, 100);
+            const reached = netWorth >= goal;
+            const remaining = goal - netWorth;
+            return (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 bg-zinc-800 rounded-full h-3 overflow-hidden">
+                    <div
+                      className={`h-3 rounded-full transition-all duration-500 ${reached ? 'bg-emerald-400' : 'bg-amber-500'}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className={`tabular-nums font-bold text-sm w-14 text-right ${reached ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {pct.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="flex justify-between text-xs text-zinc-500 tabular-nums">
+                  <span>
+                    {reached
+                      ? <span className="text-emerald-400 font-semibold">🎉 Goal reached! +{fmt$(netWorth - goal, false)} over target</span>
+                      : <span>{fmt$(remaining, false)} remaining to goal</span>
+                    }
+                  </span>
+                  <span className="text-zinc-600">{fmt$(netWorth, false)} / {fmt$(goal, false)}</span>
+                </div>
+              </div>
+            );
+          })()}
         </div>
 
         {/* Asset breakdown bar */}
