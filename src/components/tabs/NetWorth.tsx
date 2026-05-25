@@ -210,6 +210,45 @@ export default function NetWorth() {
         </div>
       </div>
 
+      {/* ── Goal progress banner ───────────────────────────────────────────── */}
+      {goal > 0 && (() => {
+        const pct     = Math.min((netWorth / goal) * 100, 100);
+        const reached = netWorth >= goal;
+        return (
+          <div className={`card py-3 border ${reached ? 'border-emerald-700 bg-emerald-950/30' : 'border-amber-800/60 bg-amber-950/20'}`}>
+            <div className="flex items-center justify-between flex-wrap gap-3 mb-2">
+              <div className="flex items-center gap-2">
+                <Target size={14} className={reached ? 'text-emerald-400' : 'text-amber-400'} />
+                <span className="text-xs font-semibold text-zinc-300 uppercase tracking-wide">Net Worth Goal</span>
+                <button
+                  onClick={() => { setGoalInput(String(goal)); setEditingGoal(true); }}
+                  className="text-zinc-600 hover:text-zinc-400 transition-colors"
+                  title="Edit goal"
+                >
+                  <Pencil size={10} />
+                </button>
+              </div>
+              <div className="flex items-center gap-3 text-xs tabular-nums">
+                <span className={`font-bold text-lg ${reached ? 'text-emerald-400' : 'text-amber-400'}`}>{pct.toFixed(1)}%</span>
+                <span className="text-zinc-500">{fmt$(netWorth, false)} / {fmt$(goal, false)}</span>
+              </div>
+            </div>
+            <div className="w-full bg-zinc-800 rounded-full h-3 overflow-hidden">
+              <div
+                className={`h-3 rounded-full transition-all duration-700 ${reached ? 'bg-emerald-400' : 'bg-amber-500'}`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <div className="mt-1.5 text-xs text-right tabular-nums">
+              {reached
+                ? <span className="text-emerald-400 font-semibold">🎉 Goal reached! +{fmt$(netWorth - goal, false)} over target</span>
+                : <span className="text-zinc-500">{fmt$(goal - netWorth, false)} remaining</span>
+              }
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Sections ───────────────────────────────────────────────────────── */}
       {SECTIONS.map(({ key, label, num }) => {
         const isInvestments = key === 'investments';
