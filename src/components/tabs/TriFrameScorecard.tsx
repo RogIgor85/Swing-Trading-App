@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Search, Star, Pencil, Check, X, AlertTriangle, TrendingUp, Clock, BarChart2, Eye } from 'lucide-react';
+import { Search, Star, Pencil, Check, X, AlertTriangle, TrendingUp, TrendingDown, Clock, BarChart2, Eye, Newspaper, Save, BookOpen } from 'lucide-react';
 import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
 import { runTriFrame, loadSettings, saveSettings } from '../../lib/scoring';
@@ -102,6 +102,29 @@ const FLAG_DEFINITIONS: Record<string, { summary: string; bullets: string[] }> =
     ],
   },
 };
+
+function fmtLarge(n: number | null | undefined): string {
+  if (n == null || isNaN(n)) return '—';
+  const abs = Math.abs(n);
+  if (abs >= 1e12) return `$${(n / 1e12).toFixed(2)}T`;
+  if (abs >= 1e9)  return `$${(n / 1e9).toFixed(1)}B`;
+  if (abs >= 1e6)  return `$${(n / 1e6).toFixed(1)}M`;
+  return `$${n.toFixed(0)}`;
+}
+function timeAgo(ts: number): string {
+  const diff = Math.floor(Date.now() / 1000 - ts);
+  if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+function pct(n: number | null | undefined, mult = 1): string {
+  if (n == null || isNaN(n)) return '—';
+  return `${(n * mult >= 0 ? '+' : '')}${(n * mult).toFixed(1)}%`;
+}
+function colorG(n: number | null | undefined): string {
+  if (n == null) return 'text-zinc-300';
+  return n >= 0 ? 'text-emerald-400' : 'text-red-400';
+}
 
 const TIER_BADGE: Record<string, string> = {
   LARGE: 'text-blue-400 border-blue-700',
@@ -339,12 +362,51 @@ export default function TriFrameScorecard() {
   const [headerEntry,  setHeaderEntry]  = useState('');
   const [headerExit,   setHeaderExit]   = useState('');
 
+  // Supplemental data
+  const [newsData,    setNewsData]    = useState<Array<{headline:string;source:string;datetime:number;url:string;summary:string}>>([]);
+  const [epsEstData,  setEpsEstData]  = useState<Array<{epsAvg:number;period:string;year:number}>>([]);
+  const [revEstData,  setRevEstData]  = useState<Array<{revenueAvg:number;period:string;year:number}>>([]);
+
+  // Thesis / investment notes
+  const [bullCase,     setBullCase]     = useState('');
+  const [bearCase,     setBearCase]     = useState('');
+  const [thesisNote,   setThesisNote]   = useState('');
+  const [notesSaving,  setNotesSaving]  = useState(false);
+  const [notesId,      setNotesId]      = useState<string | null>(null);
+  const [notesSaved,   setNotesSaved]   = useState(false);
+
   // Account size
   const [accountSize, setAccountSize] = useState<number>(() => loadSettings().accountSize ?? 0);
   const [editingAccount, setEditingAccount] = useState(false);
   const [accountInput, setAccountInput] = useState('');
   const accountRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (editingAccount) accountRef.current?.focus(); }, [editingAccount]);
+
+  // ── Thesis notes helpers ──────────────────────────────────────────────────
+  async function loadNotes(ticker: string) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const all = await storage.getAll<any>('fundamentals');
+    const ex  = all.find((n: { ticker: string }) => n.ticker === ticker);
+    if (ex) { setBullCase(ex.bull_case ?? ''); setBearCase(ex.bear_case ?? ''); setThesisNote(ex.notes ?? ''); setNotesId(ex.id); }
+    else    { setBullCase(''); setBearCase(''); setThesisNote(''); setNotesId(null); }
+  }
+
+  async function saveNotes() {
+    if (!result?.ticker) return;
+    setNotesSaving(true);
+    try {
+      const patch = { bull_case: bullCase, bear_case: bearCase, notes: thesisNote };
+      if (notesId) {
+        await storage.update('fundamentals', notesId, patch);
+      } else {
+        const row = { id: newId(), ticker: result.ticker, ...patch, created_at: nowIso() };
+        await storage.insert('fundamentals', row);
+        setNotesId(row.id);
+      }
+      setNotesSaved(true);
+      setTimeout(() => setNotesSaved(false), 2000);
+    } finally { setNotesSaving(false); }
+  }
 
   function commitAccountSize() {
     const v = parseFloat(accountInput.replace(/,/g, ''));
@@ -444,6 +506,22 @@ export default function TriFrameScorecard() {
       setAddedToWatch(false);
       setHeaderEntry('');
       setHeaderExit('');
+      setNewsData([]);
+      setEpsEstData([]);
+      setRevEstData([]);
+
+      // Fire supplemental fetches in background — don't block score display
+      void (async () => {
+        const [newsR, epsR, revR] = await Promise.allSettled([
+          finnhub.news(finnhubTicker),
+          finnhub.epsEstimate(finnhubTicker),
+          finnhub.revenueEstimate(finnhubTicker),
+        ]);
+        if (newsR.status === 'fulfilled') setNewsData(newsR.value.slice(0, 8));
+        if (epsR.status  === 'fulfilled') setEpsEstData(epsR.value?.data?.slice(0, 4) ?? []);
+        if (revR.status  === 'fulfilled') setRevEstData(revR.value?.data?.slice(0, 4) ?? []);
+      })();
+      void loadNotes(t);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unexpected error — check console.');
     } finally {
@@ -745,6 +823,204 @@ export default function TriFrameScorecard() {
 
           <div className="text-xs text-zinc-700 text-right">
             Scored {new Date(result.scoredAt).toLocaleString()} · Finnhub + Yahoo Finance
+          </div>
+
+          {/* ── KEY FUNDAMENTALS ─────────────────────────────────────────── */}
+          {(() => {
+            const sd  = yahooData?.summaryDetail;
+            const ks  = yahooData?.defaultKeyStatistics;
+            const fd  = yahooData?.financialData;
+            const fm  = finnhubMetrics?.metric;
+            const rec = fd?.recommendationKey?.replace(/_/g, ' ').toUpperCase();
+            const recColor = !rec ? 'text-zinc-400' :
+              rec.includes('STRONG BUY') ? 'text-emerald-300' : rec.includes('BUY') ? 'text-emerald-400' :
+              rec.includes('HOLD') ? 'text-amber-400' : 'text-red-400';
+            return (
+              <div className="card">
+                <h3 className="text-sm font-bold text-zinc-100 mb-4 flex items-center gap-2">
+                  <BarChart2 size={14} className="text-blue-400" /> Key Fundamentals
+                </h3>
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                  {/* Valuation */}
+                  <div>
+                    <div className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-2">Valuation</div>
+                    <div className="space-y-0">
+                      {[
+                        { label: 'Market Cap',   val: fmtLarge(yNum(sd?.marketCap) ?? (result.marketCap ?? null)) },
+                        { label: 'P/E TTM',      val: yNum(sd?.trailingPE) != null ? `${yNum(sd?.trailingPE)!.toFixed(1)}x` : fm?.peBasicExclExtraTTM != null ? `${fm.peBasicExclExtraTTM.toFixed(1)}x` : '—' },
+                        { label: 'Forward P/E',  val: yNum(ks?.forwardPE) != null ? `${yNum(ks?.forwardPE)!.toFixed(1)}x` : yNum(sd?.forwardPE) != null ? `${yNum(sd?.forwardPE)!.toFixed(1)}x` : '—' },
+                        { label: 'PEG Ratio',    val: yNum(ks?.pegRatio) != null ? `${yNum(ks?.pegRatio)!.toFixed(2)}` : '—' },
+                        { label: 'Price / Book', val: yNum(ks?.priceToBook) != null ? `${yNum(ks?.priceToBook)!.toFixed(2)}x` : fm?.pbAnnual != null ? `${fm.pbAnnual.toFixed(2)}x` : '—' },
+                        { label: 'Beta',         val: yNum(sd?.beta) != null ? yNum(sd?.beta)!.toFixed(2) : fm?.beta != null ? fm.beta.toFixed(2) : '—' },
+                        { label: 'Div Yield',    val: fm?.dividendYieldIndicatedAnnual != null && fm.dividendYieldIndicatedAnnual > 0 ? `${fm.dividendYieldIndicatedAnnual.toFixed(2)}%` : '—' },
+                        { label: 'Trailing EPS', val: yNum(ks?.trailingEps) != null ? `$${yNum(ks?.trailingEps)!.toFixed(2)}` : '—' },
+                        { label: 'Forward EPS',  val: yNum(ks?.forwardEps) != null ? `$${yNum(ks?.forwardEps)!.toFixed(2)}` : '—' },
+                      ].map(({ label, val }) => (
+                        <div key={label} className="flex justify-between items-center py-1.5 border-b border-zinc-800/40 last:border-0 text-xs">
+                          <span className="text-zinc-500">{label}</span>
+                          <span className="font-semibold tabular-nums text-zinc-200">{val}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Growth & Quality */}
+                  <div>
+                    <div className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest mb-2">Growth & Quality</div>
+                    <div className="space-y-0">
+                      {[
+                        { label: 'Revenue TTM',     val: fmtLarge(yNum(fd?.totalRevenue)),      cls: '' },
+                        { label: 'Revenue Growth',  val: fd?.revenueGrowth != null ? pct(fd.revenueGrowth, 100) : fm?.revenueGrowth3Y != null ? `${fm.revenueGrowth3Y.toFixed(1)}% (3Y)` : '—', cls: colorG(fd?.revenueGrowth ?? fm?.revenueGrowth3Y) },
+                        { label: 'Earnings Growth', val: fd?.earningsGrowth != null ? pct(fd.earningsGrowth, 100) : fm?.epsGrowth3Y != null ? `${fm.epsGrowth3Y.toFixed(1)}% (3Y)` : '—', cls: colorG(fd?.earningsGrowth ?? fm?.epsGrowth3Y) },
+                        { label: 'Gross Margin',    val: fm?.grossMarginTTM != null ? `${fm.grossMarginTTM.toFixed(1)}%` : '—',       cls: '' },
+                        { label: 'Net Margin',      val: fm?.netProfitMarginTTM != null ? `${fm.netProfitMarginTTM.toFixed(1)}%` : fd?.profitMargins != null ? `${(fd.profitMargins*100).toFixed(1)}%` : '—', cls: '' },
+                        { label: 'ROE',             val: fm?.roeTTM != null ? `${fm.roeTTM.toFixed(1)}%` : fd?.returnOnEquity != null ? `${(fd.returnOnEquity*100).toFixed(1)}%` : '—', cls: '' },
+                        { label: 'Debt / Equity',   val: fm?.debtEquityAnnual != null ? fm.debtEquityAnnual.toFixed(2) : fd?.debtToEquity != null ? (fd.debtToEquity / 100).toFixed(2) : '—', cls: '' },
+                        { label: 'Free Cash Flow',  val: fmtLarge(yNum(fd?.freeCashflow)),      cls: '' },
+                        { label: 'Current Ratio',   val: fd?.currentRatio != null ? fd.currentRatio.toFixed(2) : '—',       cls: '' },
+                      ].map(({ label, val, cls }) => (
+                        <div key={label} className="flex justify-between items-center py-1.5 border-b border-zinc-800/40 last:border-0 text-xs">
+                          <span className="text-zinc-500">{label}</span>
+                          <span className={`font-semibold tabular-nums ${cls || 'text-zinc-200'}`}>{val}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Analyst Consensus */}
+                  <div>
+                    <div className="text-[10px] font-bold text-purple-400 uppercase tracking-widest mb-2">Analyst Consensus</div>
+                    {rec && (
+                      <div className="mb-3 p-3 bg-zinc-800/50 rounded-lg text-center">
+                        <div className={`text-lg font-bold ${recColor}`}>{rec}</div>
+                        {fd?.numberOfAnalystOpinions != null && (
+                          <div className="text-xs text-zinc-500 mt-0.5">{fd.numberOfAnalystOpinions} analysts</div>
+                        )}
+                      </div>
+                    )}
+                    <div className="space-y-0">
+                      {[
+                        { label: 'Price Target',  val: fd?.targetMeanPrice != null ? fmtCurrency(fd.targetMeanPrice) : '—' },
+                        { label: 'Target High',   val: fd?.targetHighPrice != null ? fmtCurrency(fd.targetHighPrice) : '—' },
+                        { label: 'Target Low',    val: fd?.targetLowPrice  != null ? fmtCurrency(fd.targetLowPrice)  : '—' },
+                        { label: 'Upside',        val: fd?.targetMeanPrice != null && result.currentPrice > 0
+                          ? (() => { const u = (fd.targetMeanPrice - result.currentPrice) / result.currentPrice * 100; return <span className={u >= 0 ? 'text-emerald-400' : 'text-red-400'}>{u >= 0 ? '+' : ''}{u.toFixed(1)}%</span>; })()
+                          : '—' },
+                        { label: 'Short Interest',val: yNum(ks?.shortPercentOfFloat) != null ? `${(yNum(ks?.shortPercentOfFloat)! * 100).toFixed(1)}%` : '—' },
+                        { label: 'Short Ratio',   val: yNum(ks?.shortRatio) != null ? `${yNum(ks?.shortRatio)!.toFixed(1)} days` : '—' },
+                      ].map(({ label, val }) => (
+                        <div key={label} className="flex justify-between items-center py-1.5 border-b border-zinc-800/40 last:border-0 text-xs">
+                          <span className="text-zinc-500">{label}</span>
+                          <span className="font-semibold tabular-nums text-zinc-200">{val}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* EPS + Revenue estimates */}
+                    {epsEstData.length > 0 && (
+                      <div className="mt-4">
+                        <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">EPS Estimates</div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead><tr className="border-b border-zinc-800">{epsEstData.map(e => <th key={e.period} className="text-center text-zinc-600 pb-1 px-1 font-normal">{e.period}</th>)}</tr></thead>
+                            <tbody><tr>{epsEstData.map(e => <td key={e.period} className="text-center tabular-nums font-semibold text-emerald-400 px-1 pt-1">${e.epsAvg.toFixed(2)}</td>)}</tr></tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                    {revEstData.length > 0 && (
+                      <div className="mt-3">
+                        <div className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2">Revenue Estimates</div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead><tr className="border-b border-zinc-800">{revEstData.map(e => <th key={e.period} className="text-center text-zinc-600 pb-1 px-1 font-normal">{e.period}</th>)}</tr></thead>
+                            <tbody><tr>{revEstData.map(e => <td key={e.period} className="text-center tabular-nums font-semibold text-blue-400 px-1 pt-1">{fmtLarge(e.revenueAvg)}</td>)}</tr></tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ── NEWS FEED ────────────────────────────────────────────────── */}
+          {newsData.length > 0 && (
+            <div className="card">
+              <h3 className="text-sm font-bold text-zinc-100 mb-4 flex items-center gap-2">
+                <Newspaper size={14} className="text-blue-400" />
+                Recent News <span className="text-zinc-600 text-xs font-normal">({newsData.length})</span>
+              </h3>
+              <div className="space-y-1">
+                {newsData.map((n, i) => (
+                  <a key={i} href={n.url} target="_blank" rel="noopener noreferrer"
+                    className="flex gap-3 group hover:bg-zinc-800/50 -mx-3 px-3 py-2.5 rounded transition-colors">
+                    <div className="flex-shrink-0 mt-0.5">
+                      {i % 2 === 0 ? <TrendingUp size={12} className="text-zinc-600" /> : <TrendingDown size={12} className="text-zinc-600" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm text-zinc-300 group-hover:text-blue-300 transition-colors font-medium leading-snug">{n.headline}</div>
+                      {n.summary && <div className="text-xs text-zinc-600 mt-0.5 line-clamp-1">{n.summary}</div>}
+                    </div>
+                    <div className="text-[10px] text-zinc-700 flex-shrink-0 self-start mt-0.5 whitespace-nowrap">{n.source} · {timeAgo(n.datetime)}</div>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── INVESTMENT THESIS ────────────────────────────────────────── */}
+          <div className="card">
+            <h3 className="text-sm font-bold text-zinc-100 mb-4 flex items-center gap-2">
+              <BookOpen size={14} className="text-amber-400" /> Investment Thesis
+              {notesId && <span className="text-[10px] text-zinc-600 font-normal ml-1">· saved</span>}
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+              <div>
+                <label className="text-xs font-semibold text-emerald-400 uppercase tracking-wide block mb-1.5">🟢 Bull Case</label>
+                <textarea
+                  className="input-base resize-none text-sm"
+                  rows={4}
+                  placeholder="Why this stock goes up — catalysts, tailwinds, growth drivers..."
+                  value={bullCase}
+                  onChange={e => setBullCase(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-red-400 uppercase tracking-wide block mb-1.5">🔴 Bear Case</label>
+                <textarea
+                  className="input-base resize-none text-sm"
+                  rows={4}
+                  placeholder="Key risks, headwinds, what could go wrong..."
+                  value={bearCase}
+                  onChange={e => setBearCase(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="mb-4">
+              <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wide block mb-1.5">Notes</label>
+              <textarea
+                className="input-base resize-none text-sm"
+                rows={3}
+                placeholder="Entry levels, key dates, position sizing thoughts..."
+                value={thesisNote}
+                onChange={e => setThesisNote(e.target.value)}
+              />
+            </div>
+            <button
+              onClick={saveNotes}
+              disabled={notesSaving}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+                notesSaved
+                  ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-700'
+                  : 'bg-blue-700 hover:bg-blue-600 text-white disabled:opacity-50'
+              }`}
+            >
+              <Save size={13} />
+              {notesSaved ? 'Saved!' : notesSaving ? 'Saving…' : 'Save Thesis'}
+            </button>
           </div>
         </>
       )}

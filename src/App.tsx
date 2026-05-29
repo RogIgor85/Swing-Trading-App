@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react';
-import { TrendingUp, Eye, ScanLine, PieChart, BookOpen, ClipboardList, Layers, LogOut, Wallet, Download } from 'lucide-react';
+import { TrendingUp, Eye, ScanLine, PieChart, ClipboardList, Layers, LogOut, Wallet, Download } from 'lucide-react';
 import { exportAllToExcel } from './lib/exportExcel';
 import TriFrameScorecard from './components/tabs/TriFrameScorecard';
 import WatchList from './components/tabs/WatchList';
 import ChartAnalysis from './components/tabs/ChartAnalysis';
 import PortfolioRisk from './components/tabs/PortfolioRisk';
-import Fundamentals from './components/tabs/Fundamentals';
 import TradeJournal from './components/tabs/TradeJournal';
 import OptionsTracker from './components/tabs/OptionsTracker';
 import NetWorth from './components/tabs/NetWorth';
@@ -21,7 +20,6 @@ const TABS = [
   { id: 'journal',   label: 'Trade Journal', icon: ClipboardList },
   { id: 'sprint',    label: 'Options',        icon: TrendingUp },
   { id: 'networth',     label: 'Net Worth',    icon: Wallet },
-  { id: 'fundamentals', label: 'Fundamentals', icon: BookOpen },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -131,7 +129,6 @@ export default function App() {
         {activeTab === 'watchlist' && <WatchList />}
         {activeTab === 'technical' && <ChartAnalysis />}
         {activeTab === 'portfolio' && <PortfolioRisk />}
-        {activeTab === 'fundamentals' && <Fundamentals />}
         {activeTab === 'journal' && <TradeJournal />}
         {activeTab === 'sprint' && <OptionsTracker />}
         {activeTab === 'networth' && <NetWorth />}
