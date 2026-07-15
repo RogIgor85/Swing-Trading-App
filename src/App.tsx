@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
-import { TrendingUp, Eye, ScanLine, PieChart, ClipboardList, Layers, LogOut, Wallet, Download, FileSearch } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { TrendingUp, Eye, ScanLine, PieChart, ClipboardList, Layers, LogOut, Wallet, Download, FileSearch, DatabaseBackup, Upload } from 'lucide-react';
 import { exportAllToExcel } from './lib/exportExcel';
+import { downloadBackup, restoreBackup } from './lib/backup';
 import TriFrameScorecard from './components/tabs/TriFrameScorecard';
 import WatchList from './components/tabs/WatchList';
 import ChartAnalysis from './components/tabs/ChartAnalysis';
@@ -29,6 +30,32 @@ type TabId = (typeof TABS)[number]['id'];
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('scorecard');
   const [user, setUser]           = useState<User | null | undefined>(undefined); // undefined = loading
+  const [restoring, setRestoring] = useState(false);
+  const restoreInputRef           = useRef<HTMLInputElement>(null);
+
+  async function handleRestoreFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-selecting the same file later
+    if (!file) return;
+    if (!confirm(`Restore data from "${file.name}"?\n\nThis only ADDS missing rows — nothing is overwritten or deleted.`)) return;
+    setRestoring(true);
+    try {
+      const res = await restoreBackup(file);
+      const restoredTotal = Object.values(res.restored).reduce((s, n) => s + n, 0);
+      const skippedTotal  = Object.values(res.skipped).reduce((s, n) => s + n, 0);
+      const lines = [
+        `Restored ${restoredTotal} row${restoredTotal === 1 ? '' : 's'}.`,
+        skippedTotal > 0 ? `Skipped ${skippedTotal} already-existing row${skippedTotal === 1 ? '' : 's'}.` : '',
+        res.errors.length > 0 ? `\nErrors:\n${res.errors.slice(0, 5).join('\n')}` : '',
+      ].filter(Boolean);
+      alert(lines.join('\n'));
+      if (restoredTotal > 0) window.location.reload();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Restore failed.');
+    } finally {
+      setRestoring(false);
+    }
+  }
 
   useEffect(() => {
     if (!supabase) { setUser(null); return; }
@@ -90,6 +117,30 @@ export default function App() {
                 <Download size={13} />
                 <span className="hidden sm:block">Export</span>
               </button>
+              <button
+                onClick={() => downloadBackup()}
+                title="Download full JSON backup of all data"
+                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-blue-400 transition-colors px-2 py-1 rounded-lg hover:bg-zinc-800"
+              >
+                <DatabaseBackup size={13} />
+                <span className="hidden sm:block">Backup</span>
+              </button>
+              <button
+                onClick={() => restoreInputRef.current?.click()}
+                disabled={restoring}
+                title="Restore data from a JSON backup file"
+                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-amber-400 transition-colors px-2 py-1 rounded-lg hover:bg-zinc-800 disabled:opacity-50"
+              >
+                <Upload size={13} />
+                <span className="hidden sm:block">{restoring ? 'Restoring…' : 'Restore'}</span>
+              </button>
+              <input
+                ref={restoreInputRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={handleRestoreFile}
+                className="hidden"
+              />
               {user && (
                 <button
                   onClick={handleSignOut}

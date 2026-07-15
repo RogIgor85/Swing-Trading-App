@@ -42,6 +42,25 @@ async function tryChart(ticker: string): Promise<any> {
     const ma50  = sma(closes, 50)  ?? meta.fiftyDayAverage     ?? null;
     const ma200 = sma(closes, 200) ?? meta.twoHundredDayAverage ?? null;
 
+    // YTD + 1Y returns from timestamps/closes (decimals, e.g. 0.12 = +12%)
+    let ytdReturn: number | null = null;
+    let oneYearReturn: number | null = null;
+    try {
+      const timestamps: number[] = result?.timestamp ?? [];
+      const rawCloses: (number | null)[] = result?.indicators?.quote?.[0]?.close ?? [];
+      const jan1 = new Date(new Date().getFullYear(), 0, 1).getTime() / 1000;
+      let ytdBase: number | null = null;
+      let firstValid: number | null = null;
+      for (let i = 0; i < timestamps.length; i++) {
+        const c = rawCloses[i];
+        if (c == null || typeof c !== 'number') continue;
+        if (firstValid == null) firstValid = c;
+        if (ytdBase == null && timestamps[i] >= jan1) ytdBase = c;
+      }
+      if (ytdBase != null && ytdBase > 0) ytdReturn = (price - ytdBase) / ytdBase;
+      if (firstValid != null && firstValid > 0) oneYearReturn = (price - firstValid) / firstValid;
+    } catch { /* leave nulls */ }
+
     return {
       price: {
         regularMarketPrice:         price,
@@ -68,6 +87,10 @@ async function tryChart(ticker: string): Promise<any> {
         averageVolume:          meta.averageVolume        ?? null,
         beta:                   null,
         volume:                 meta.regularMarketVolume  ?? null,
+      },
+      performance: {
+        ytdReturn,
+        oneYearReturn,
       },
       _partial: true,
     };

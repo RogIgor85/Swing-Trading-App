@@ -6,11 +6,12 @@ import {
 import { storage } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
+import { getUsdCad } from '../../lib/fx';
 import type { Holding, FinnhubQuote, FinnhubMetrics, FinnhubProfile } from '../../types';
 
 const MANUAL_PRICES_KEY = 'swing_manual_prices';
 const LIVE_PRICES_KEY   = 'swing_live_prices';
-const USD_CAD_RATE      = 1.38;
+const EARNINGS_CACHE_KEY = 'swing_earnings_dates';
 
 type Rating = 'STRONG HOLD' | 'HOLD' | 'TRIM' | 'WATCH' | 'EXIT';
 
@@ -35,6 +36,7 @@ interface RawRow {
   currentPrice: number;      // in the holding's own currency
   usdRefPrice: number | null; // Finnhub USD price — used ONLY for technical checks
   metrics: FinnhubMetrics['metric'] | null;
+  earningsDate: string | null; // next earnings date (YYYY-MM-DD), if within 90 days
   cadValue: number;
   costCAD: number;
 }
@@ -74,6 +76,9 @@ interface ReviewResult {
   totalCostCAD: number;
   warnings: string[];
   generatedAt: string;
+  fxRate: number;
+  annualDividendsCAD: number;
+  benchmarks: { spyYtd: number | null; tsxYtd: number | null };
 }
 
 // ─── company-level scoring (one analysis per company, shared across accounts) ─
@@ -198,6 +203,25 @@ function analyzeCompany(members: RawRow[], groupAllocationPct: number): CompanyA
   if (groupAllocationPct > 30)      { flags.push(`${groupAllocationPct.toFixed(1)}% of portfolio combined`); cons.push(`Overweight (${groupAllocationPct.toFixed(1)}% of portfolio across accounts) — concentration risk`); score -= 0.5; }
   else if (groupAllocationPct > 20) { flags.push(`${groupAllocationPct.toFixed(1)}% of portfolio combined`); }
 
+  // ── Upcoming earnings ─────────────────────────────────────────────────────
+  const earningsDate = members.find(x => x.earningsDate)?.earningsDate ?? null;
+  if (earningsDate) {
+    const days = Math.ceil((new Date(earningsDate + 'T00:00:00').getTime() - Date.now()) / 86400000);
+    if (days >= 0 && days <= 7) {
+      flags.push(`⚠ Earnings in ${days === 0 ? 'today' : `${days}d`}`);
+      cons.push(`Earnings report on ${earningsDate} — biggest single-day risk for a swing position. Consider position sizing before the print.`);
+    } else if (days > 7 && days <= 21) {
+      flags.push(`Earnings ${earningsDate}`);
+    }
+  }
+
+  // ── Dividend yield ────────────────────────────────────────────────────────
+  if (m?.dividendYieldIndicatedAnnual != null && m.dividendYieldIndicatedAnnual > 0) {
+    const dy = m.dividendYieldIndicatedAnnual;
+    if (dy >= 4)      { pros.push(`Strong dividend yield (${dy.toFixed(2)}%) — paid to wait`); score += 0.3; }
+    else if (dy >= 2) { pros.push(`Pays a ${dy.toFixed(2)}% dividend`); }
+  }
+
   score = Math.round(Math.min(10, Math.max(1, score)) * 10) / 10;
 
   let rating: Rating;
@@ -279,22 +303,31 @@ export default function PortfolioReview() {
 
       setProgress({ current: 0, total: holdings.length });
 
+      // Benchmarks fetched in parallel with the holdings; FX needed up front
+      const spyPromise = fetchYahoo('SPY').catch(() => null);
+      const tsxPromise = fetchYahoo('XIC.TO').catch(() => null);
+      const fxRate     = await getUsdCad();
+
       const rawResults = await Promise.allSettled(
         holdings.map(async (h): Promise<RawRow> => {
           const isCAD    = /\.TO$/i.test(h.ticker);
           const finnhubT = baseTickerKey(h.ticker);
 
-          const [qRes, mRes, pRes, yRes] = await Promise.allSettled([
+          const [qRes, mRes, pRes, yRes, eRes] = await Promise.allSettled([
             finnhub.quote(finnhubT),
             finnhub.metrics(finnhubT),
             finnhub.profile(finnhubT),
             isCAD ? fetchYahoo(h.ticker) : Promise.resolve(null),
+            finnhub.earningsCalendar(finnhubT),
           ]);
 
           const quote: FinnhubQuote | null   = qRes.status === 'fulfilled' ? qRes.value : null;
           let metrics                        = mRes.status === 'fulfilled' ? mRes.value?.metric ?? null : null;
           const profile: FinnhubProfile | null = pRes.status === 'fulfilled' ? pRes.value : null;
           const yahoo = yRes.status === 'fulfilled' ? yRes.value as Awaited<ReturnType<typeof fetchYahoo>> | null : null;
+          const earningsDate = eRes.status === 'fulfilled'
+            ? (eRes.value?.earningsCalendar?.map(e => e.date).sort()[0] ?? null)
+            : null;
 
           const yahooName = yahoo?.price?.longName ?? yahoo?.price?.shortName ?? null;
 
@@ -311,17 +344,17 @@ export default function PortfolioReview() {
           // Display price in the holding's own currency
           const yahooPrice = yahoo?.price?.regularMarketPrice ?? null;
           const livePrice  = isCAD
-            ? (yahooPrice ?? (usdRefPrice != null ? usdRefPrice * USD_CAD_RATE : null))
+            ? (yahooPrice ?? (usdRefPrice != null ? usdRefPrice * fxRate : null))
             : usdRefPrice;
 
           const currentPrice = manualPrices[h.ticker] ?? livePrice ?? livePricesCache[h.ticker]?.price ?? h.avg_cost;
 
           const mktVal   = h.shares * currentPrice;
-          const cadValue = h.currency === 'USD' ? mktVal * USD_CAD_RATE : mktVal;
-          const costCAD  = h.shares * h.avg_cost * (h.currency === 'USD' ? USD_CAD_RATE : 1);
+          const cadValue = h.currency === 'USD' ? mktVal * fxRate : mktVal;
+          const costCAD  = h.shares * h.avg_cost * (h.currency === 'USD' ? fxRate : 1);
 
           setProgress(p => ({ ...p, current: p.current + 1 }));
-          return { h, companyName, currentPrice, usdRefPrice, metrics, cadValue, costCAD };
+          return { h, companyName, currentPrice, usdRefPrice, metrics, earningsDate, cadValue, costCAD };
         })
       );
 
@@ -397,9 +430,35 @@ export default function PortfolioReview() {
       if (trimCnt  > 0) warnings.push(`${trimCnt} stock${trimCnt > 1 ? 's' : ''} suggest TRIM`);
       if (heaviest.allocationPct > 30) warnings.push(`${heaviest.base} is ${heaviest.allocationPct.toFixed(1)}% of portfolio combined`);
 
+      // Estimated annual dividend income (CAD): Σ market value × indicated yield
+      const annualDividendsCAD = rows.reduce((s, r) => {
+        const dy = r.metrics?.dividendYieldIndicatedAnnual;
+        return dy && dy > 0 ? s + r.cadValue * (dy / 100) : s;
+      }, 0);
+
+      // Earnings-within-a-week warning at the portfolio level + cache for Portfolio tab badges
+      const earningsCache: Record<string, string> = {};
+      for (const r of rows) {
+        if (r.earningsDate) earningsCache[r.h.ticker] = r.earningsDate;
+      }
+      localStorage.setItem(EARNINGS_CACHE_KEY, JSON.stringify(earningsCache));
+      const soonEarnings = [...groupMap.values()]
+        .map(members => ({ base: baseTickerKey(members[0].h.ticker), date: members.find(x => x.earningsDate)?.earningsDate ?? null }))
+        .filter(x => x.date != null && (new Date(x.date + 'T00:00:00').getTime() - Date.now()) / 86400000 <= 7)
+        .map(x => x.base);
+      if (soonEarnings.length > 0) warnings.push(`Earnings within 7 days: ${soonEarnings.join(', ')}`);
+
+      // Benchmark YTD returns
+      const [spyData, tsxData] = await Promise.all([spyPromise, tsxPromise]);
+      const benchmarks = {
+        spyYtd: spyData?.performance?.ytdReturn ?? null,
+        tsxYtd: tsxData?.performance?.ytdReturn ?? null,
+      };
+
       setResult({
         cards, portfolioScore, totalPnLCAD, totalCostCAD, warnings,
         generatedAt: new Date().toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }),
+        fxRate, annualDividendsCAD, benchmarks,
       });
     } catch (e) {
       setError('Failed to load portfolio data. Check your connection and try again.');
@@ -512,6 +571,48 @@ export default function PortfolioReview() {
                 ? <div className="text-xs text-zinc-600">No critical alerts</div>
                 : <ul className="space-y-1">{result.warnings.map((w, i) => <li key={i} className="text-xs text-amber-400">{w}</li>)}</ul>
               }
+            </div>
+          </div>
+
+          {/* Benchmarks + dividends row */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+              <div className="text-xs text-zinc-500 mb-2">vs Benchmarks (YTD)</div>
+              <div className="flex items-center gap-6 flex-wrap">
+                <div>
+                  <div className="text-xs text-zinc-500">Your P&amp;L on cost</div>
+                  <div className={`text-lg font-bold ${result.totalPnLCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {result.totalCostCAD > 0 ? `${result.totalPnLCAD >= 0 ? '+' : ''}${fmt2((result.totalPnLCAD / result.totalCostCAD) * 100, 1)}%` : '—'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-zinc-500">S&amp;P 500 (SPY)</div>
+                  <div className={`text-lg font-bold ${(result.benchmarks.spyYtd ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {result.benchmarks.spyYtd != null ? `${result.benchmarks.spyYtd >= 0 ? '+' : ''}${fmt2(result.benchmarks.spyYtd * 100, 1)}%` : '—'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-zinc-500">TSX (XIC)</div>
+                  <div className={`text-lg font-bold ${(result.benchmarks.tsxYtd ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {result.benchmarks.tsxYtd != null ? `${result.benchmarks.tsxYtd >= 0 ? '+' : ''}${fmt2(result.benchmarks.tsxYtd * 100, 1)}%` : '—'}
+                  </div>
+                </div>
+              </div>
+              <div className="text-xs text-zinc-600 mt-2">
+                P&amp;L on cost is lifetime, benchmarks are calendar-year — directional comparison only
+              </div>
+            </div>
+
+            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+              <div className="text-xs text-zinc-500 mb-2">Est. Annual Dividend Income</div>
+              <div className="text-lg font-bold text-emerald-400">
+                {result.annualDividendsCAD > 0 ? `${fmtMoney(result.annualDividendsCAD)} CAD / yr` : '—'}
+              </div>
+              <div className="text-xs text-zinc-600 mt-2">
+                {result.annualDividendsCAD > 0
+                  ? `≈ ${fmtMoney(result.annualDividendsCAD / 12)} per month at current yields · USD/CAD ${result.fxRate.toFixed(4)}`
+                  : 'No dividend-paying holdings detected'}
+              </div>
             </div>
           </div>
 

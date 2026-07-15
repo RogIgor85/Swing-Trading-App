@@ -4,6 +4,7 @@ import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recha
 import { storage, newId, nowIso } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
+import { getUsdCad, getUsdCadCached } from '../../lib/fx';
 import { toYahooTicker } from '../FundamentalsDrawer';
 import { fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import FundamentalsDrawer from '../FundamentalsDrawer';
@@ -12,6 +13,8 @@ import type { Holding, LiquidityRisk, Account, Currency } from '../../types';
 const MANUAL_PRICES_KEY  = 'swing_manual_prices';
 const LIVE_PRICES_KEY    = 'swing_live_prices';
 const DAILY_CHANGE_KEY   = 'swing_daily_change';
+const EARNINGS_CACHE_KEY = 'swing_earnings_dates';
+const TARGET_NOTIFIED_KEY = 'swing_target_notified';
 
 interface DailyChangeSnapshot {
   pct:       number;
@@ -127,8 +130,8 @@ export default function PortfolioRisk() {
   const priceInputRef = useRef<HTMLInputElement>(null);
   const [selectedTicker, setSelectedTicker] = useState<{ ticker: string; currency: string } | null>(null);
 
-  // USD/CAD exchange rate
-  const [usdCadRate, setUsdCadRate] = useState<number>(DEFAULT_RATE);
+  // USD/CAD exchange rate — starts from last cached live rate
+  const [usdCadRate, setUsdCadRate] = useState<number>(getUsdCadCached);
   const [rateLoading, setRateLoading] = useState(false);
   const [editingRate, setEditingRate] = useState(false);
   const [rateInput, setRateInput] = useState('');
@@ -163,13 +166,13 @@ export default function PortfolioRisk() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Fetch live USD/CAD rate on mount
+  // Fetch live USD/CAD rate on mount (Yahoo CAD=X, cached 12h)
   async function fetchRate() {
     setRateLoading(true);
     try {
-      const q = await finnhub.quote('OANDA:USD_CAD');
-      if (q.c && q.c > 0) setUsdCadRate(q.c);
-    } catch { /* keep default */ } finally {
+      const rate = await getUsdCad();
+      if (rate > 0) setUsdCadRate(rate);
+    } catch { /* keep cached/default */ } finally {
       setRateLoading(false);
     }
   }
@@ -425,6 +428,48 @@ export default function PortfolioRisk() {
     };
   });
 
+  // ── Sell-target hits: banner + one browser notification per ticker per day ──
+  const targetHits = enriched.filter(h =>
+    h.target_price != null && h.target_price > 0
+    && h.priceSource !== 'cost'
+    && h.currentPrice >= h.target_price
+    && (h.currentPrice - h.target_price) / h.target_price <= 1  // ignore ancient targets
+  );
+
+  useEffect(() => {
+    if (targetHits.length === 0) return;
+    const today = new Date().toISOString().split('T')[0];
+    let notified: Record<string, string> = {};
+    try { notified = JSON.parse(localStorage.getItem(TARGET_NOTIFIED_KEY) ?? '{}'); } catch { /* fresh */ }
+
+    const fresh = targetHits.filter(h => notified[h.ticker] !== today);
+    if (fresh.length === 0) return;
+
+    fresh.forEach(h => { notified[h.ticker] = today; });
+    localStorage.setItem(TARGET_NOTIFIED_KEY, JSON.stringify(notified));
+
+    if (typeof Notification !== 'undefined') {
+      const fire = () => new Notification('🎯 Sell target hit', {
+        body: fresh.map(h => `${h.ticker}: $${h.currentPrice.toFixed(2)} ≥ target $${h.target_price}`).join('\n'),
+      });
+      if (Notification.permission === 'granted') fire();
+      else if (Notification.permission !== 'denied') {
+        Notification.requestPermission().then(p => { if (p === 'granted') fire(); });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetHits.map(h => h.ticker).join(',')]);
+
+  // Earnings dates cached by the Portfolio Review run
+  let earningsDates: Record<string, string> = {};
+  try { earningsDates = JSON.parse(localStorage.getItem(EARNINGS_CACHE_KEY) ?? '{}'); } catch { /* none */ }
+  const daysToEarnings = (ticker: string): number | null => {
+    const d = earningsDates[ticker];
+    if (!d) return null;
+    const days = Math.ceil((new Date(d + 'T00:00:00').getTime() - Date.now()) / 86400000);
+    return days >= 0 ? days : null;
+  };
+
   // Allocation % relative to TOTAL portfolio in CAD (all accounts)
   const totalPortfolioCAD = enriched.reduce((s, h) => s + h.cadMarketValue, 0);
 
@@ -516,6 +561,27 @@ export default function PortfolioRisk() {
 
   return (
     <div className="space-y-6">
+      {/* Sell-target hit banner */}
+      {targetHits.length > 0 && (
+        <div className="bg-emerald-950/50 border border-emerald-700/50 rounded-xl p-4 flex items-start gap-3">
+          <Target size={16} className="text-emerald-400 mt-0.5 shrink-0" />
+          <div>
+            <div className="text-sm font-semibold text-emerald-300">
+              🎯 {targetHits.length === 1 ? 'Sell target hit' : `${targetHits.length} sell targets hit`}
+            </div>
+            <div className="text-xs text-emerald-400/80 mt-1 space-y-0.5">
+              {targetHits.map(h => (
+                <div key={h.id}>
+                  <span className="font-mono font-bold">{h.ticker}</span>
+                  {' '}({h.account}) — ${h.currentPrice.toFixed(2)} is at/above your ${h.target_price!.toFixed(2)} target
+                  {' '}· consider taking profits
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Add holding form */}
       <div className="card">
         <div className="flex items-center justify-between mb-5">
@@ -725,10 +791,24 @@ export default function PortfolioRisk() {
 
                       {/* Ticker + sector + dates */}
                       <td className="td">
-                        <button onClick={() => setSelectedTicker({ ticker: h.ticker, currency: h.currency })}
-                          className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 flex items-center gap-1 group">
-                          {h.ticker}<ExternalLink size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          <button onClick={() => setSelectedTicker({ ticker: h.ticker, currency: h.currency })}
+                            className="font-mono font-bold text-blue-400 hover:text-blue-300 hover:underline underline-offset-2 flex items-center gap-1 group">
+                            {h.ticker}<ExternalLink size={10} className="opacity-0 group-hover:opacity-60 transition-opacity" />
+                          </button>
+                          {(() => {
+                            const d = daysToEarnings(h.ticker);
+                            if (d == null || d > 14) return null;
+                            return (
+                              <span
+                                title={`Earnings ${earningsDates[h.ticker]}`}
+                                className={`text-[10px] px-1 py-0.5 rounded font-medium ${d <= 7 ? 'bg-amber-900/50 text-amber-300 border border-amber-700/50' : 'bg-zinc-800 text-zinc-400'}`}
+                              >
+                                ⚠ ER {d === 0 ? 'today' : `${d}d`}
+                              </span>
+                            );
+                          })()}
+                        </div>
                         <div className="text-zinc-600 leading-tight">{h.sector}</div>
                         <div className="text-zinc-400 leading-tight tabular-nums mt-0.5">
                           📅 {h.purchase_date ?? '—'}{h.sell_date ? ` → ${h.sell_date}` : ''}

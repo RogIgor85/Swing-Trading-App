@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Plus, Trash2, Check, X, Pencil, RefreshCw, Target } from 'lucide-react';
 import { storage, newId, nowIso } from '../../lib/storage';
+import { getUsdCad, getUsdCadCached } from '../../lib/fx';
 import type { Holding } from '../../types';
 
 const TABLE = 'net_worth_items';
@@ -81,8 +82,13 @@ export default function NetWorth() {
   const [editId, setEditId]     = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Partial<Row>>({});
   const [portfolioAccounts, setPortfolioAccounts] = useState<PortfolioAccount[]>([]);
-  const [usdCadRate, setUsdCadRate] = useState(1.38);
+  const [usdCadRate, setUsdCadRate] = useState<number>(getUsdCadCached);
   const [syncing, setSyncing]   = useState(false);
+
+  // Live USD/CAD rate on mount (still user-editable afterwards)
+  useEffect(() => {
+    getUsdCad().then(r => { if (r > 0) setUsdCadRate(r); }).catch(() => { /* keep cached */ });
+  }, []);
 
   // ── Net Worth Goal ──────────────────────────────────────────────────────
   const [goal, setGoal]           = useState<number>(() => {

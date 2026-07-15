@@ -46,6 +46,12 @@ export const finnhub = {
     get<Array<{ headline: string; source: string; datetime: number; url: string; summary: string }>>(
       `/company-news?symbol=${symbol.toUpperCase()}&from=${daysAgo(30)}&to=${today()}`
     ),
+
+  // Upcoming earnings dates in the next 90 days
+  earningsCalendar: (symbol: string) =>
+    get<{ earningsCalendar: Array<{ date: string; epsEstimate: number | null; hour: string; quarter: number; year: number }> }>(
+      `/calendar/earnings?from=${today()}&to=${daysAhead(90)}&symbol=${symbol.toUpperCase()}`
+    ),
 };
 
 function today() {
@@ -54,5 +60,10 @@ function today() {
 function daysAgo(n: number) {
   const d = new Date();
   d.setDate(d.getDate() - n);
+  return d.toISOString().split('T')[0];
+}
+function daysAhead(n: number) {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
   return d.toISOString().split('T')[0];
 }

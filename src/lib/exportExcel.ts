@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import { storage } from './storage';
+import { getUsdCadCached } from './fx';
 import type { WatchItem, Holding } from '../types';
 
 // ── ARGB colour palette ───────────────────────────────────────────────────────
@@ -15,7 +16,8 @@ const R_FONT  = 'FF9C0006';
 const A_FILL  = 'FFFFEB9C';
 const A_FONT  = 'FF9C5700';
 const MONEY   = '#,##0;(#,##0);"-"';
-const USD_CAD = 1.38;
+// Last cached live USD/CAD rate (falls back to 1.38 before first fetch)
+const USD_CAD = getUsdCadCached();
 
 // ── cell helpers ──────────────────────────────────────────────────────────────
 function border(cell: ExcelJS.Cell, color = 'FFD0D0D0') {

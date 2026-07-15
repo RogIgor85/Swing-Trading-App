@@ -73,12 +73,18 @@ export interface YahooCalendar {
   earningsDate?: string[] | null;
 }
 
+export interface YahooPerformance {
+  ytdReturn?: number | null;     // decimal, e.g. 0.12 = +12%
+  oneYearReturn?: number | null; // decimal
+}
+
 export interface YahooData {
   financialData?: YahooFinancialData;
   defaultKeyStatistics?: YahooKeyStats;
   summaryDetail?: YahooSummaryDetail;
   calendarEvents?: { earnings?: YahooCalendar };
   price?: YahooPrice;
+  performance?: YahooPerformance;
   _error?: string;
   _partial?: boolean;
 }
