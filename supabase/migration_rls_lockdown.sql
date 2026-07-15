@@ -11,13 +11,10 @@
 --   5. Creates a strict policy: each user can only see/insert/update/delete
 --      their OWN rows (auth.uid() = user_id)
 --
--- After running this, sharing the app link is safe: new users who sign up
--- get an empty app and can never read or touch your data.
---
--- IMPORTANT: verify you are the only user first —
---   select id, email from auth.users;
--- should return exactly one row (you). If there are extra/test accounts,
--- delete them in Dashboard → Authentication → Users before running this.
+-- After running this, sharing the app link is safe: every user (including
+-- existing ones) only sees their own rows, and new signups get an empty app.
+-- Rows that already have a user_id keep their current owner (e.g. Fred's
+-- holdings stay Fred's). Only ownerless rows are assigned to the app owner.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 do $$
@@ -44,10 +41,10 @@ declare
     'watchlist'
   ];
 begin
-  -- Grab your user id (you must be the only user — see note above)
-  select id into my_user_id from auth.users order by created_at asc limit 1;
+  -- Orphan rows (no user_id) get assigned to the app owner's account
+  select id into my_user_id from auth.users where lower(email) = 'luc_igor@yahoo.ca';
   if my_user_id is null then
-    raise exception 'No users found in auth.users — sign in to the app once, then re-run.';
+    raise exception 'Owner account luc_igor@yahoo.ca not found in auth.users.';
   end if;
 
   foreach t in array tables loop
