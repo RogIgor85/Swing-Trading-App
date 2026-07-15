@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { storage } from '../../lib/storage';
 import { finnhub } from '../../lib/finnhub';
+import { fetchYahoo } from '../../lib/yahoo';
 import type { Holding, FinnhubQuote, FinnhubMetrics, FinnhubProfile } from '../../types';
 
 const MANUAL_PRICES_KEY = 'swing_manual_prices';
@@ -13,14 +14,18 @@ const USD_CAD_RATE      = 1.38;
 
 type Rating = 'STRONG HOLD' | 'HOLD' | 'TRIM' | 'WATCH' | 'EXIT';
 
-// Strip exchange suffixes to find the underlying company
-function baseTicker(t: string) {
+function baseTickerKey(t: string) {
   return t.replace(/\.(TO|V|TSX|HK|L|AX)$/i, '').toUpperCase();
 }
 
-// The ticker to send to Finnhub (always strip .TO etc.)
-function finnhubTicker(t: string) {
-  return baseTicker(t);
+// Detect if two company names refer to the same company (share significant words)
+function namesMatch(a: string, b: string): boolean {
+  const clean = (s: string) =>
+    s.toLowerCase().replace(/\b(inc|corp|ltd|co|plc|lp|llc|the|and|of|company|limited)\b\.?/g, '').trim();
+  const ca = clean(a);
+  const cb = clean(b);
+  const words = ca.split(/\s+/).filter(w => w.length > 3);
+  return words.some(w => cb.includes(w));
 }
 
 interface PositionData {
@@ -35,6 +40,7 @@ interface PositionData {
 
 interface GroupReview {
   base: string;
+  displayTicker: string;    // actual ticker for single-account, base for multi
   companyName: string;
   sector: string;
   positions: PositionData[];
@@ -64,10 +70,11 @@ interface ReviewResult {
 
 function generateGroupReview(
   base: string,
+  displayTicker: string,
+  companyName: string,
   positions: PositionData[],
   allocationPct: number,
   metrics: FinnhubMetrics['metric'] | null,
-  profile: FinnhubProfile | null,
 ): GroupReview {
   const pros: string[] = [];
   const cons: string[] = [];
@@ -88,7 +95,7 @@ function generateGroupReview(
     pros.push(`Up ${totalPnLPct.toFixed(1)}% on combined position`);
     score += 1.5;
   } else if (totalPnLPct >= 3) {
-    pros.push(`Up ${totalPnLPct.toFixed(1)}% on combined position`);
+    pros.push(`Up ${totalPnLPct.toFixed(1)}% from cost basis`);
     score += 0.5;
   } else if (totalPnLPct >= 0) {
     pros.push(`Slightly above cost basis (+${totalPnLPct.toFixed(1)}%)`);
@@ -110,23 +117,20 @@ function generateGroupReview(
     const tp = p.holding.target_price;
     if (!tp || tp <= 0) continue;
     const price = p.currentPrice;
-    const pctToTarget = ((tp - price) / price) * 100;
+    const pctToTarget   = ((tp - price) / price) * 100;
     const pctAboveTarget = ((price - tp) / tp) * 100;
 
     if (price >= tp) {
       if (pctAboveTarget > 100) {
-        // Target is very stale — just note it
-        cons.push(
-          `${p.holding.ticker}: Sell target ($${tp}) is outdated — price has far exceeded it. Update your target.`
-        );
+        // Target is very stale — skip silently, no alarm
       } else {
-        flags.push(`${p.holding.ticker}: At/above sell target $${tp}`);
-        cons.push(`${p.holding.ticker}: Price reached sell target ($${tp}) — consider taking profits`);
+        flags.push(`${p.holding.ticker}: at sell target $${tp}`);
+        cons.push(`${p.holding.ticker}: price has reached sell target ($${tp}) — consider taking profits`);
         score -= 0.5;
       }
     } else if (pctToTarget < 5) {
-      flags.push(`${p.holding.ticker}: Near sell target ($${tp})`);
-      pros.push(`${p.holding.ticker}: Within ${pctToTarget.toFixed(1)}% of sell target ($${tp})`);
+      flags.push(`${p.holding.ticker}: near sell target $${tp}`);
+      pros.push(`${p.holding.ticker}: within ${pctToTarget.toFixed(1)}% of sell target ($${tp})`);
     } else {
       pros.push(`${p.holding.ticker}: ${pctToTarget.toFixed(1)}% upside to sell target ($${tp})`);
       score += 0.3;
@@ -158,17 +162,9 @@ function generateGroupReview(
   // ── Beta ──────────────────────────────────────────────────────────────────
   if (m?.beta != null) {
     const b = m.beta;
-    if (b < 0.8) {
-      pros.push(`Low volatility (Beta ${b.toFixed(2)}) — stable, defensive stock`);
-      score += 0.5;
-    } else if (b > 2.2) {
-      cons.push(`Very high volatility (Beta ${b.toFixed(2)}) — large swing risk`);
-      score -= 1;
-      flags.push(`High Beta: ${b.toFixed(2)}`);
-    } else if (b > 1.6) {
-      cons.push(`Above-average volatility (Beta ${b.toFixed(2)})`);
-      score -= 0.5;
-    }
+    if (b < 0.8) { pros.push(`Low volatility (Beta ${b.toFixed(2)}) — stable, defensive stock`); score += 0.5; }
+    else if (b > 2.2) { cons.push(`Very high volatility (Beta ${b.toFixed(2)}) — large swing risk`); score -= 1; flags.push(`High Beta: ${b.toFixed(2)}`); }
+    else if (b > 1.6) { cons.push(`Above-average volatility (Beta ${b.toFixed(2)})`); score -= 0.5; }
   }
 
   // ── EPS growth ────────────────────────────────────────────────────────────
@@ -249,12 +245,13 @@ function generateGroupReview(
     action = 'Thesis may be broken. Consider exiting to redeploy capital into higher-conviction opportunities.';
   }
 
-  const primaryPosition = positions.find(p => p.holding.currency === 'USD') ?? positions[0];
+  const sector = (positions.find(p => p.holding.currency === 'USD') ?? positions[0]).holding.sector;
 
   return {
     base,
-    companyName: profile?.name ?? base,
-    sector: primaryPosition.holding.sector,
+    displayTicker,
+    companyName,
+    sector,
     positions,
     totalCadValue,
     totalPnLCAD,
@@ -279,7 +276,6 @@ function ratingColor(r: Rating) {
   if (r === 'WATCH')       return 'text-orange-400 border-orange-500/40 bg-orange-500/10';
   return 'text-red-400 border-red-500/40 bg-red-500/10';
 }
-
 function ratingBorder(r: Rating) {
   if (r === 'STRONG HOLD') return 'border-l-emerald-500';
   if (r === 'HOLD')        return 'border-l-blue-500';
@@ -287,7 +283,6 @@ function ratingBorder(r: Rating) {
   if (r === 'WATCH')       return 'border-l-orange-500';
   return 'border-l-red-500';
 }
-
 function ratingIcon(r: Rating) {
   if (r === 'STRONG HOLD') return <CheckCircle size={14} className="text-emerald-400" />;
   if (r === 'HOLD')        return <Shield size={14} className="text-blue-400" />;
@@ -337,19 +332,17 @@ export default function PortfolioReview() {
         return;
       }
 
-      const manualPrices: Record<string, number> =
-        JSON.parse(localStorage.getItem(MANUAL_PRICES_KEY) ?? '{}');
-      const livePricesCache: Record<string, { price: number }> =
-        JSON.parse(localStorage.getItem(LIVE_PRICES_KEY) ?? '{}');
+      const manualPrices: Record<string, number>             = JSON.parse(localStorage.getItem(MANUAL_PRICES_KEY) ?? '{}');
+      const livePricesCache: Record<string, { price: number }> = JSON.parse(localStorage.getItem(LIVE_PRICES_KEY) ?? '{}');
 
       setProgress({ current: 0, total: holdings.length });
 
-      // Fetch data per holding
       type RawData = {
         holding: Holding;
         quote: FinnhubQuote | null;
         metrics: FinnhubMetrics['metric'] | null;
         profile: FinnhubProfile | null;
+        companyName: string;     // correct name (Yahoo-verified for .TO tickers)
         currentPrice: number;
         cadValue: number;
         costCAD: number;
@@ -357,16 +350,36 @@ export default function PortfolioReview() {
 
       const rawResults = await Promise.allSettled(
         holdings.map(async (h): Promise<RawData> => {
-          const ft = finnhubTicker(h.ticker);
-          const [qRes, mRes, pRes] = await Promise.allSettled([
+          const isCAD = /\.TO$/i.test(h.ticker);
+          const ft    = baseTickerKey(h.ticker);   // e.g. MSFT, T, SHOP
+
+          const [qRes, mRes, pRes, yRes] = await Promise.allSettled([
             finnhub.quote(ft),
             finnhub.metrics(ft),
             finnhub.profile(ft),
+            isCAD ? fetchYahoo(h.ticker) : Promise.resolve(null),
           ]);
 
-          const quote   = qRes.status === 'fulfilled' ? qRes.value   : null;
-          const metrics = mRes.status === 'fulfilled' ? mRes.value?.metric ?? null : null;
-          const profile = pRes.status === 'fulfilled' ? pRes.value   : null;
+          const quote      = qRes.status === 'fulfilled' ? qRes.value : null;
+          const metricsRaw = mRes.status === 'fulfilled' ? mRes.value?.metric ?? null : null;
+          const profile    = pRes.status === 'fulfilled' ? pRes.value : null;
+          const yahoo      = yRes.status === 'fulfilled' ? yRes.value : null;
+
+          // Prefer Yahoo company name for .TO tickers (avoids e.g. T.TO → "AT&T")
+          const yahooName = (yahoo as Awaited<ReturnType<typeof fetchYahoo>> | null)?.price?.longName
+                         ?? (yahoo as Awaited<ReturnType<typeof fetchYahoo>> | null)?.price?.shortName
+                         ?? null;
+
+          // Validate Finnhub metrics: if Finnhub and Yahoo names don't match,
+          // Finnhub is returning data for a different company (ticker collision)
+          let validMetrics = metricsRaw;
+          if (isCAD && yahooName && profile?.name) {
+            if (!namesMatch(profile.name, yahooName)) {
+              validMetrics = null;  // e.g. AT&T metrics for Telus — discard
+            }
+          }
+
+          const companyName = yahooName ?? profile?.name ?? h.ticker;
 
           const livePrice    = quote?.c && quote.c > 0 ? quote.c : null;
           const currentPrice = manualPrices[h.ticker] ?? livePrice ?? livePricesCache[h.ticker]?.price ?? h.avg_cost;
@@ -375,7 +388,7 @@ export default function PortfolioReview() {
           const costCAD      = h.shares * h.avg_cost * (h.currency === 'USD' ? USD_CAD_RATE : 1);
 
           setProgress(p => ({ ...p, current: p.current + 1 }));
-          return { holding: h, quote, metrics, profile, currentPrice, cadValue, costCAD };
+          return { holding: h, quote, metrics: validMetrics, profile, companyName, currentPrice, cadValue, costCAD };
         })
       );
 
@@ -385,10 +398,10 @@ export default function PortfolioReview() {
 
       const totalPortfolioCAD = rows.reduce((s, r) => s + r.cadValue, 0);
 
-      // Group by base ticker (MSFT.TO + MSFT → MSFT)
+      // Group by base ticker (MSFT.TO + MSFT → one card)
       const groupMap = new Map<string, RawData[]>();
       for (const row of rows) {
-        const key = baseTicker(row.holding.ticker);
+        const key = baseTickerKey(row.holding.ticker);
         if (!groupMap.has(key)) groupMap.set(key, []);
         groupMap.get(key)!.push(row);
       }
@@ -398,20 +411,32 @@ export default function PortfolioReview() {
         const groupCadValue = members.reduce((s, m) => s + m.cadValue, 0);
         const allocationPct = totalPortfolioCAD > 0 ? (groupCadValue / totalPortfolioCAD) * 100 : 0;
 
-        // Prefer USD member for metrics/profile (Finnhub data is more reliable for US-listed tickers)
-        const primary = members.find(m => m.holding.currency === 'USD') ?? members[0];
+        // For display: single account → show actual ticker (e.g. T.TO, SHOP.TO)
+        //              multiple accounts → show base (e.g. MSFT)
+        const displayTicker = members.length === 1 ? members[0].holding.ticker : base;
+
+        // Company name: prefer USD member's name (Finnhub better for US), fallback to first
+        const primary     = members.find(m => m.holding.currency === 'USD') ?? members[0];
+        const companyName = primary.companyName || base;
 
         const positions: PositionData[] = members.map(m => ({
-          holding: m.holding,
+          holding:      m.holding,
           currentPrice: m.currentPrice,
-          pnl: (m.currentPrice - m.holding.avg_cost) * m.holding.shares,
-          pnlPct: m.holding.avg_cost > 0 ? ((m.currentPrice - m.holding.avg_cost) / m.holding.avg_cost) * 100 : 0,
-          cadValue: m.cadValue,
-          costCAD: m.costCAD,
-          quote: m.quote,
+          pnl:          (m.currentPrice - m.holding.avg_cost) * m.holding.shares,
+          pnlPct:       m.holding.avg_cost > 0 ? ((m.currentPrice - m.holding.avg_cost) / m.holding.avg_cost) * 100 : 0,
+          cadValue:     m.cadValue,
+          costCAD:      m.costCAD,
+          quote:        m.quote,
         }));
 
-        const group = generateGroupReview(base, positions, allocationPct, primary.metrics, primary.profile);
+        const group = generateGroupReview(
+          base,
+          displayTicker,
+          companyName,
+          positions,
+          allocationPct,
+          primary.metrics,
+        );
         groups.push(group);
       }
 
@@ -429,9 +454,16 @@ export default function PortfolioReview() {
       if (exitCnt  > 0) warnings.push(`${exitCnt} position${exitCnt > 1 ? 's' : ''} flagged for EXIT`);
       if (watchCnt > 0) warnings.push(`${watchCnt} position${watchCnt > 1 ? 's' : ''} on WATCH`);
       if (trimCnt  > 0) warnings.push(`${trimCnt} position${trimCnt > 1 ? 's' : ''} suggest TRIM`);
-      if (heaviest.allocationPct > 30) warnings.push(`${heaviest.base} is ${heaviest.allocationPct.toFixed(1)}% of portfolio`);
+      if (heaviest.allocationPct > 30) warnings.push(`${heaviest.displayTicker} is ${heaviest.allocationPct.toFixed(1)}% of portfolio`);
 
-      setResult({ groups, portfolioScore, totalPnLCAD, totalCostCAD, warnings, generatedAt: new Date().toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }) });
+      setResult({
+        groups,
+        portfolioScore,
+        totalPnLCAD,
+        totalCostCAD,
+        warnings,
+        generatedAt: new Date().toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }),
+      });
     } catch (e) {
       setError('Failed to load portfolio data. Check your connection and try again.');
       console.error(e);
@@ -441,10 +473,10 @@ export default function PortfolioReview() {
   }
 
   function portfolioLabel(score: number) {
-    if (score >= 7.5) return { text: 'STRONG',   color: 'text-emerald-400' };
-    if (score >= 6)   return { text: 'HEALTHY',  color: 'text-blue-400'   };
-    if (score >= 4.5) return { text: 'MIXED',    color: 'text-amber-400'  };
-    if (score >= 3)   return { text: 'AT RISK',  color: 'text-orange-400' };
+    if (score >= 7.5) return { text: 'STRONG',  color: 'text-emerald-400' };
+    if (score >= 6)   return { text: 'HEALTHY', color: 'text-blue-400'   };
+    if (score >= 4.5) return { text: 'MIXED',   color: 'text-amber-400'  };
+    if (score >= 3)   return { text: 'AT RISK', color: 'text-orange-400' };
     return { text: 'CRITICAL', color: 'text-red-400' };
   }
 
@@ -460,7 +492,7 @@ export default function PortfolioReview() {
               Portfolio Review
             </h2>
             <p className="text-xs text-zinc-500 mt-1">
-              Rule-based analysis of every position — same company across accounts grouped together
+              Rule-based analysis of every position — same company across accounts grouped into one card
             </p>
           </div>
           <button
@@ -495,7 +527,7 @@ export default function PortfolioReview() {
 
       {result && !loading && (
         <>
-          {/* Portfolio summary */}
+          {/* Summary bar */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 col-span-2 sm:col-span-1">
               <div className="text-xs text-zinc-500 mb-1">Portfolio Health</div>
@@ -512,9 +544,7 @@ export default function PortfolioReview() {
                 {result.totalPnLCAD >= 0 ? '+' : '-'}{fmtMoney(result.totalPnLCAD)}
               </div>
               <div className={`text-xs mt-1 ${result.totalPnLCAD >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                {result.totalCostCAD > 0
-                  ? `${result.totalPnLCAD >= 0 ? '+' : ''}${fmt2((result.totalPnLCAD / result.totalCostCAD) * 100, 1)}% on cost`
-                  : '—'}
+                {result.totalCostCAD > 0 ? `${result.totalPnLCAD >= 0 ? '+' : ''}${fmt2((result.totalPnLCAD / result.totalCostCAD) * 100, 1)}% on cost` : '—'}
               </div>
             </div>
 
@@ -541,9 +571,7 @@ export default function PortfolioReview() {
               </div>
               {result.warnings.length === 0
                 ? <div className="text-xs text-zinc-600">No critical alerts</div>
-                : <ul className="space-y-1">{result.warnings.map((w, i) => (
-                    <li key={i} className="text-xs text-amber-400">{w}</li>
-                  ))}</ul>
+                : <ul className="space-y-1">{result.warnings.map((w, i) => <li key={i} className="text-xs text-amber-400">{w}</li>)}</ul>
               }
             </div>
           </div>
@@ -555,12 +583,12 @@ export default function PortfolioReview() {
                 key={g.base}
                 className={`bg-zinc-900 border border-zinc-800 border-l-4 ${ratingBorder(g.rating)} rounded-xl p-5`}
               >
-                {/* Header row */}
+                {/* Card header */}
                 <div className="flex items-start gap-3 flex-wrap">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-base font-bold text-zinc-100">{g.base}</span>
-                      {g.companyName !== g.base && (
+                      <span className="text-base font-bold text-zinc-100">{g.displayTicker}</span>
+                      {g.companyName !== g.displayTicker && (
                         <span className="text-sm text-zinc-500">{g.companyName}</span>
                       )}
                       {g.flags.map((f, i) => (
@@ -628,9 +656,7 @@ export default function PortfolioReview() {
                           <td className={`pt-2 text-right text-xs font-medium ${g.totalPnLCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                             {g.totalPnLCAD >= 0 ? '+' : '-'}{fmtMoney(g.totalPnLCAD)} CAD
                           </td>
-                          <td className="pt-2 text-right text-xs text-zinc-300">
-                            {fmtMoney(g.totalCadValue)} CAD
-                          </td>
+                          <td className="pt-2 text-right text-xs text-zinc-300">{fmtMoney(g.totalCadValue)} CAD</td>
                           <td />
                         </tr>
                       )}
@@ -691,7 +717,9 @@ export default function PortfolioReview() {
       {!result && !loading && !error && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-12 text-center">
           <Star size={32} className="text-zinc-700 mx-auto mb-3" />
-          <p className="text-zinc-500 text-sm">Click <strong className="text-zinc-400">Run Full Review</strong> to analyze every position in your portfolio.</p>
+          <p className="text-zinc-500 text-sm">
+            Click <strong className="text-zinc-400">Run Full Review</strong> to analyze every position.
+          </p>
           <p className="text-zinc-600 text-xs mt-1">Holdings of the same company across accounts are grouped into one card.</p>
         </div>
       )}
