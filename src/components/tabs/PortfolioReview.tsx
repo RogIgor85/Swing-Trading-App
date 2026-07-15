@@ -381,9 +381,14 @@ export default function PortfolioReview() {
 
           const companyName = yahooName ?? profile?.name ?? h.ticker;
 
-          const livePrice    = quote?.c && quote.c > 0 ? quote.c : null;
+          // For .TO tickers use Yahoo's CAD price; for US tickers use Finnhub USD price
+          const yahooLivePrice = (yahoo as Awaited<ReturnType<typeof fetchYahoo>> | null)?.price?.regularMarketPrice ?? null;
+          const finnhubPrice   = quote?.c && quote.c > 0 ? quote.c : null;
+          const livePrice      = isCAD ? (yahooLivePrice ?? (finnhubPrice != null ? finnhubPrice * USD_CAD_RATE : null)) : finnhubPrice;
+
           const currentPrice = manualPrices[h.ticker] ?? livePrice ?? livePricesCache[h.ticker]?.price ?? h.avg_cost;
           const mktValue     = h.shares * currentPrice;
+          // currentPrice is now always in the holding's native currency
           const cadValue     = h.currency === 'USD' ? mktValue * USD_CAD_RATE : mktValue;
           const costCAD      = h.shares * h.avg_cost * (h.currency === 'USD' ? USD_CAD_RATE : 1);
 
