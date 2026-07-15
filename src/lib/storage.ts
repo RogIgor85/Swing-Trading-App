@@ -45,8 +45,11 @@ export const storage = {
 
   async update<T>(table: string, id: string, patch: Partial<T>): Promise<void> {
     if (supabase) {
+      const userId = await getUserId();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { error } = await supabase.from(table).update(patch as any).eq('id', id);
+      let query = supabase.from(table).update(patch as any).eq('id', id);
+      if (userId) query = query.eq('user_id', userId);
+      const { error } = await query;
       if (error) throw error;
       return;
     }
@@ -58,7 +61,10 @@ export const storage = {
 
   async remove(table: string, id: string): Promise<void> {
     if (supabase) {
-      const { error } = await supabase.from(table).delete().eq('id', id);
+      const userId = await getUserId();
+      let query = supabase.from(table).delete().eq('id', id);
+      if (userId) query = query.eq('user_id', userId);
+      const { error } = await query;
       if (error) throw error;
       return;
     }
