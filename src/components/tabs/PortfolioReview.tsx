@@ -14,7 +14,42 @@ const USD_CAD_RATE      = 1.38;
 
 type Rating = 'STRONG HOLD' | 'HOLD' | 'TRIM' | 'WATCH' | 'EXIT';
 
-interface StockReview {
+function baseTickerKey(t: string) {
+  return t.replace(/\.(TO|V|TSX)$/i, '').toUpperCase();
+}
+
+// Detect if two company names refer to the same company (share significant words)
+function namesMatch(a: string, b: string): boolean {
+  const clean = (s: string) =>
+    s.toLowerCase().replace(/\b(inc|corp|corporation|ltd|co|plc|lp|llc|the|and|of|company|limited)\b\.?/g, '').trim();
+  const ca = clean(a);
+  const cb = clean(b);
+  const words = ca.split(/\s+/).filter(w => w.length > 3);
+  return words.length === 0 ? ca === cb : words.some(w => cb.includes(w));
+}
+
+// Raw fetched data for one holding
+interface RawRow {
+  h: Holding;
+  companyName: string;
+  currentPrice: number;      // in the holding's own currency
+  usdRefPrice: number | null; // Finnhub USD price — used ONLY for technical checks
+  metrics: FinnhubMetrics['metric'] | null;
+  cadValue: number;
+  costCAD: number;
+}
+
+// Shared company-level analysis (same for every account holding this stock)
+interface CompanyAnalysis {
+  rating: Rating;
+  ratingScore: number;
+  pros: string[];
+  cons: string[];
+  action: string;
+  flags: string[];
+}
+
+interface StockCard {
   ticker: string;
   companyName: string;
   sector: string;
@@ -24,21 +59,16 @@ interface StockReview {
   avgCost: number;
   currentPrice: number;
   targetPrice: number | null;
-  pnl: number;
   pnlPct: number;
   mktVal: number;
   allocationPct: number;
-  rating: Rating;
-  ratingScore: number;
-  pros: string[];
-  cons: string[];
-  action: string;
-  flags: string[];
-  metrics: FinnhubMetrics['metric'] | null;
+  beta: number | null;
+  analysis: CompanyAnalysis;
+  siblingCount: number;      // how many accounts hold this company
 }
 
 interface ReviewResult {
-  reviews: StockReview[];
+  cards: StockCard[];
   portfolioScore: number;
   totalPnLCAD: number;
   totalCostCAD: number;
@@ -46,80 +76,83 @@ interface ReviewResult {
   generatedAt: string;
 }
 
-// ─── scoring engine ──────────────────────────────────────────────────────────
+// ─── company-level scoring (one analysis per company, shared across accounts) ─
 
-function generateReview(
-  h: Holding,
-  currentPrice: number,
-  allocationPct: number,
-  companyName: string,
-  metrics: FinnhubMetrics['metric'] | null,
-  _profile: FinnhubProfile | null,
-): StockReview {
+function analyzeCompany(members: RawRow[], groupAllocationPct: number): CompanyAnalysis {
   const pros: string[] = [];
   const cons: string[] = [];
   const flags: string[] = [];
   let score = 5;
 
-  const pnl    = (currentPrice - h.avg_cost) * h.shares;
-  const pnlPct = h.avg_cost > 0 ? ((currentPrice - h.avg_cost) / h.avg_cost) * 100 : 0;
-  const mktVal = currentPrice * h.shares;
-  const m = metrics;
+  const totalCadValue = members.reduce((s, m) => s + m.cadValue, 0);
+  const totalCostCAD  = members.reduce((s, m) => s + m.costCAD, 0);
+  const totalPnLPct   = totalCostCAD > 0 ? ((totalCadValue - totalCostCAD) / totalCostCAD) * 100 : 0;
 
-  // ── P&L vs entry ──────────────────────────────────────────────────────────
-  if (pnlPct >= 25)       { pros.push(`Up ${pnlPct.toFixed(1)}% from entry — substantial gain`); score += 2; }
-  else if (pnlPct >= 10)  { pros.push(`Up ${pnlPct.toFixed(1)}% from entry`); score += 1.5; }
-  else if (pnlPct >= 3)   { pros.push(`Up ${pnlPct.toFixed(1)}% from entry`); score += 0.5; }
-  else if (pnlPct >= 0)   { pros.push(`Slightly above entry (+${pnlPct.toFixed(1)}%)`); }
-  else if (pnlPct >= -10) { cons.push(`Down ${Math.abs(pnlPct).toFixed(1)}% from entry`); score -= 1; }
-  else if (pnlPct >= -20) { cons.push(`Down ${Math.abs(pnlPct).toFixed(1)}% from entry — consider stop loss`); score -= 1.5; flags.push('Loss >10%'); }
-  else                    { cons.push(`Down ${Math.abs(pnlPct).toFixed(1)}% from entry — significant drawdown`); score -= 2.5; flags.push('Loss >20% — review thesis'); }
+  // Metrics: prefer a member that has them (they're all the same company)
+  const m = members.find(x => x.metrics != null)?.metrics ?? null;
+  // USD reference price for technical checks — same currency as Finnhub metrics
+  const usdPrice = members.find(x => x.usdRefPrice != null)?.usdRefPrice ?? null;
 
-  // ── Sell target ───────────────────────────────────────────────────────────
-  if (h.target_price && h.target_price > 0) {
-    const tp = h.target_price;
-    const pctToTarget    = ((tp - currentPrice) / currentPrice) * 100;
-    const pctAboveTarget = ((currentPrice - tp) / tp) * 100;
-    if (currentPrice >= tp) {
-      if (pctAboveTarget <= 100) {   // only flag if recently hit, not ancient targets
-        flags.push(`At/above sell target $${tp}`);
-        cons.push(`Price reached sell target ($${tp}) — consider taking profits`);
+  // ── Combined P&L across all accounts ─────────────────────────────────────
+  if (totalPnLPct >= 25)       { pros.push(`Up ${totalPnLPct.toFixed(1)}% overall — substantial gain`); score += 2; }
+  else if (totalPnLPct >= 10)  { pros.push(`Up ${totalPnLPct.toFixed(1)}% overall`); score += 1.5; }
+  else if (totalPnLPct >= 3)   { pros.push(`Up ${totalPnLPct.toFixed(1)}% overall`); score += 0.5; }
+  else if (totalPnLPct >= 0)   { pros.push(`Slightly above cost basis (+${totalPnLPct.toFixed(1)}%)`); }
+  else if (totalPnLPct >= -10) { cons.push(`Down ${Math.abs(totalPnLPct).toFixed(1)}% overall`); score -= 1; }
+  else if (totalPnLPct >= -20) { cons.push(`Down ${Math.abs(totalPnLPct).toFixed(1)}% overall — consider stop loss`); score -= 1.5; flags.push('Loss >10%'); }
+  else                         { cons.push(`Down ${Math.abs(totalPnLPct).toFixed(1)}% overall — significant drawdown`); score -= 2.5; flags.push('Loss >20% — review thesis'); }
+
+  // ── Sell targets (per account, each in its own currency) ─────────────────
+  for (const mem of members) {
+    const tp = mem.h.target_price;
+    if (!tp || tp <= 0) continue;
+    const price = mem.currentPrice;
+    const pctToTarget    = ((tp - price) / price) * 100;
+    const pctAboveTarget = ((price - tp) / tp) * 100;
+    const label = members.length > 1 ? `${mem.h.ticker}: ` : '';
+    if (price >= tp) {
+      if (pctAboveTarget <= 100) {  // ignore ancient/stale targets
+        flags.push(`${mem.h.ticker} at sell target $${tp}`);
+        cons.push(`${label}price reached sell target ($${tp}) — consider taking profits`);
         score -= 0.5;
       }
     } else if (pctToTarget < 5) {
-      flags.push(`Near sell target $${tp}`);
-      pros.push(`Within ${pctToTarget.toFixed(1)}% of sell target ($${tp})`);
+      flags.push(`${mem.h.ticker} near sell target $${tp}`);
+      pros.push(`${label}within ${pctToTarget.toFixed(1)}% of sell target ($${tp})`);
     } else {
-      pros.push(`${pctToTarget.toFixed(1)}% upside to sell target ($${tp})`);
+      pros.push(`${label}${pctToTarget.toFixed(1)}% upside to sell target ($${tp})`);
       score += 0.3;
     }
   }
 
-  // ── 52-week range ─────────────────────────────────────────────────────────
-  if (m?.['52WeekHigh'] && m?.['52WeekLow']) {
+  // ── 52-week range — USD price vs USD metrics only, never mixed ───────────
+  if (m?.['52WeekHigh'] && m?.['52WeekLow'] && usdPrice != null) {
     const hi = m['52WeekHigh'], lo = m['52WeekLow'];
-    const pos = (hi - lo) > 0 ? ((currentPrice - lo) / (hi - lo)) * 100 : 50;
-    if (pos >= 80)      { pros.push(`Near 52-week high (${pos.toFixed(0)}% of range) — strong momentum`); score += 1; }
-    else if (pos >= 55) { pros.push(`Upper half of 52-week range (${pos.toFixed(0)}%)`); score += 0.5; }
-    else if (pos <= 20) { cons.push(`Near 52-week low (${pos.toFixed(0)}% of range) — weak trend`); score -= 1.5; flags.push('Near 52W low'); }
-    else if (pos <= 40) { cons.push(`Lower portion of 52-week range (${pos.toFixed(0)}%)`); score -= 0.5; }
+    // Sanity check: price must plausibly belong to this range
+    if (hi > lo && usdPrice >= lo * 0.5 && usdPrice <= hi * 1.5) {
+      const pos = Math.min(100, Math.max(0, ((usdPrice - lo) / (hi - lo)) * 100));
+      if (pos >= 80)      { pros.push(`Near 52-week high (${pos.toFixed(0)}% of range) — strong momentum`); score += 1; }
+      else if (pos >= 55) { pros.push(`Upper half of 52-week range (${pos.toFixed(0)}%)`); score += 0.5; }
+      else if (pos <= 20) { cons.push(`Near 52-week low (${pos.toFixed(0)}% of range) — weak trend`); score -= 1.5; flags.push('Near 52W low'); }
+      else if (pos <= 40) { cons.push(`Lower portion of 52-week range (${pos.toFixed(0)}%)`); score -= 0.5; }
+    }
   }
 
   // ── Beta ──────────────────────────────────────────────────────────────────
   if (m?.beta != null) {
     const b = m.beta;
-    if (b < 0.8)       { pros.push(`Low volatility (Beta ${b.toFixed(2)}) — stable, defensive`); score += 0.5; }
-    else if (b > 2.2)  { cons.push(`Very high volatility (Beta ${b.toFixed(2)}) — large swing risk`); score -= 1; flags.push(`High Beta: ${b.toFixed(2)}`); }
-    else if (b > 1.6)  { cons.push(`Above-average volatility (Beta ${b.toFixed(2)})`); score -= 0.5; }
+    if (b < 0.8)      { pros.push(`Low volatility (Beta ${b.toFixed(2)}) — stable, defensive`); score += 0.5; }
+    else if (b > 2.2) { cons.push(`Very high volatility (Beta ${b.toFixed(2)}) — large swing risk`); score -= 1; flags.push(`High Beta: ${b.toFixed(2)}`); }
+    else if (b > 1.6) { cons.push(`Above-average volatility (Beta ${b.toFixed(2)})`); score -= 0.5; }
   }
 
   // ── EPS growth ────────────────────────────────────────────────────────────
   if (m?.epsGrowth3Y != null) {
     const g = m.epsGrowth3Y;
-    if (g > 25)       { pros.push(`Strong EPS growth: ${g.toFixed(1)}% (3-year CAGR)`); score += 1; }
-    else if (g > 10)  { pros.push(`Solid EPS growth: ${g.toFixed(1)}% (3-year CAGR)`); score += 0.5; }
-    else if (g < -5)  { cons.push(`Declining earnings: ${g.toFixed(1)}% EPS growth (3-year)`); score -= 1; }
-    else if (g < 0)   { cons.push(`Flat/negative EPS growth: ${g.toFixed(1)}% (3-year)`); score -= 0.5; }
+    if (g > 25)      { pros.push(`Strong EPS growth: ${g.toFixed(1)}% (3-year CAGR)`); score += 1; }
+    else if (g > 10) { pros.push(`Solid EPS growth: ${g.toFixed(1)}% (3-year CAGR)`); score += 0.5; }
+    else if (g < -5) { cons.push(`Declining earnings: ${g.toFixed(1)}% EPS growth (3-year)`); score -= 1; }
+    else if (g < 0)  { cons.push(`Flat/negative EPS growth: ${g.toFixed(1)}% (3-year)`); score -= 0.5; }
   }
 
   // ── Revenue growth ────────────────────────────────────────────────────────
@@ -161,9 +194,9 @@ function generateReview(
     else if (pe < 0)       { cons.push(`Negative earnings — unprofitable on trailing basis`); score -= 0.5; }
   }
 
-  // ── Concentration ─────────────────────────────────────────────────────────
-  if (allocationPct > 30)      { flags.push(`${allocationPct.toFixed(1)}% of portfolio`); cons.push(`Overweight (${allocationPct.toFixed(1)}% of portfolio) — concentration risk`); score -= 0.5; }
-  else if (allocationPct > 20) { flags.push(`${allocationPct.toFixed(1)}% of portfolio`); }
+  // ── Concentration (combined weight across accounts) ───────────────────────
+  if (groupAllocationPct > 30)      { flags.push(`${groupAllocationPct.toFixed(1)}% of portfolio combined`); cons.push(`Overweight (${groupAllocationPct.toFixed(1)}% of portfolio across accounts) — concentration risk`); score -= 0.5; }
+  else if (groupAllocationPct > 20) { flags.push(`${groupAllocationPct.toFixed(1)}% of portfolio combined`); }
 
   score = Math.round(Math.min(10, Math.max(1, score)) * 10) / 10;
 
@@ -175,12 +208,7 @@ function generateReview(
   else if (score >= 3)   { rating = 'WATCH';       action = 'Monitor closely. Revisit original thesis. Be prepared to exit if price breaks below key support.'; }
   else                   { rating = 'EXIT';         action = 'Thesis may be broken. Consider exiting to redeploy capital into higher-conviction opportunities.'; }
 
-  return {
-    ticker: h.ticker, companyName, sector: h.sector, account: h.account,
-    currency: h.currency, shares: h.shares, avgCost: h.avg_cost,
-    currentPrice, targetPrice: h.target_price, pnl, pnlPct, mktVal,
-    allocationPct, rating, ratingScore: score, pros, cons, action, flags, metrics,
-  };
+  return { rating, ratingScore: score, pros, cons, action, flags };
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -251,12 +279,10 @@ export default function PortfolioReview() {
 
       setProgress({ current: 0, total: holdings.length });
 
-      type RawRow = { h: Holding; review: StockReview; cadValue: number; costCAD: number };
-
       const rawResults = await Promise.allSettled(
         holdings.map(async (h): Promise<RawRow> => {
-          const isCAD     = /\.TO$/i.test(h.ticker);
-          const finnhubT  = h.ticker.replace(/\.TO$/i, '').toUpperCase();
+          const isCAD    = /\.TO$/i.test(h.ticker);
+          const finnhubT = baseTickerKey(h.ticker);
 
           const [qRes, mRes, pRes, yRes] = await Promise.allSettled([
             finnhub.quote(finnhubT),
@@ -265,33 +291,37 @@ export default function PortfolioReview() {
             isCAD ? fetchYahoo(h.ticker) : Promise.resolve(null),
           ]);
 
-          const quote   = qRes.status === 'fulfilled' ? qRes.value : null;
-          const metrics = mRes.status === 'fulfilled' ? mRes.value?.metric ?? null : null;
-          const profile = pRes.status === 'fulfilled' ? pRes.value : null;
-          const yahoo   = yRes.status === 'fulfilled' ? yRes.value as Awaited<ReturnType<typeof fetchYahoo>> | null : null;
+          const quote: FinnhubQuote | null   = qRes.status === 'fulfilled' ? qRes.value : null;
+          let metrics                        = mRes.status === 'fulfilled' ? mRes.value?.metric ?? null : null;
+          const profile: FinnhubProfile | null = pRes.status === 'fulfilled' ? pRes.value : null;
+          const yahoo = yRes.status === 'fulfilled' ? yRes.value as Awaited<ReturnType<typeof fetchYahoo>> | null : null;
 
-          // Company name: Yahoo for .TO (correct name), Finnhub for US tickers
-          const companyName = yahoo?.price?.longName ?? yahoo?.price?.shortName ?? profile?.name ?? h.ticker;
+          const yahooName = yahoo?.price?.longName ?? yahoo?.price?.shortName ?? null;
 
-          // Price: Yahoo CAD price for .TO, Finnhub USD price for US tickers
-          const yahooPrice   = yahoo?.price?.regularMarketPrice ?? null;
-          const finnhubPrice = quote?.c && quote.c > 0 ? quote.c : null;
-          const livePrice    = isCAD
-            ? (yahooPrice ?? (finnhubPrice != null ? finnhubPrice * USD_CAD_RATE : null))
-            : finnhubPrice;
+          // Ticker collision guard: if Finnhub resolved to a different company
+          // than Yahoo (e.g. T → AT&T but T.TO → Telus), discard Finnhub data
+          let usdRefPrice = quote?.c && quote.c > 0 ? quote.c : null;
+          if (isCAD && yahooName && profile?.name && !namesMatch(profile.name, yahooName)) {
+            metrics = null;
+            usdRefPrice = null;
+          }
+
+          const companyName = yahooName ?? profile?.name ?? h.ticker;
+
+          // Display price in the holding's own currency
+          const yahooPrice = yahoo?.price?.regularMarketPrice ?? null;
+          const livePrice  = isCAD
+            ? (yahooPrice ?? (usdRefPrice != null ? usdRefPrice * USD_CAD_RATE : null))
+            : usdRefPrice;
 
           const currentPrice = manualPrices[h.ticker] ?? livePrice ?? livePricesCache[h.ticker]?.price ?? h.avg_cost;
 
-          // cadValue and costCAD for portfolio-level totals
           const mktVal   = h.shares * currentPrice;
           const cadValue = h.currency === 'USD' ? mktVal * USD_CAD_RATE : mktVal;
           const costCAD  = h.shares * h.avg_cost * (h.currency === 'USD' ? USD_CAD_RATE : 1);
 
           setProgress(p => ({ ...p, current: p.current + 1 }));
-
-          // placeholder review — allocationPct filled in after total is known
-          const review = generateReview(h, currentPrice, 0, companyName, metrics, profile);
-          return { h, review, cadValue, costCAD };
+          return { h, companyName, currentPrice, usdRefPrice, metrics, cadValue, costCAD };
         })
       );
 
@@ -303,36 +333,72 @@ export default function PortfolioReview() {
       const totalCostCAD = rows.reduce((s, r) => s + r.costCAD, 0);
       const totalPnLCAD  = totalCAD - totalCostCAD;
 
-      // Re-run review with correct allocation %
-      const reviews: StockReview[] = rows.map(({ h, review, cadValue, costCAD }) => {
-        const allocationPct = totalCAD > 0 ? (cadValue / totalCAD) * 100 : 0;
-        // rebuild with correct allocationPct
-        return generateReview(
-          h,
-          review.currentPrice,
-          allocationPct,
-          review.companyName,
-          review.metrics,
-          null,
-        );
+      // Group by company for the shared analysis (rating/pros/cons identical
+      // across accounts), then render one card per holding
+      const groupMap = new Map<string, RawRow[]>();
+      for (const row of rows) {
+        const key = baseTickerKey(row.h.ticker);
+        if (!groupMap.has(key)) groupMap.set(key, []);
+        groupMap.get(key)!.push(row);
+      }
+
+      const cards: StockCard[] = [];
+      for (const members of groupMap.values()) {
+        const groupCad          = members.reduce((s, m) => s + m.cadValue, 0);
+        const groupAllocationPct = totalCAD > 0 ? (groupCad / totalCAD) * 100 : 0;
+        const analysis          = analyzeCompany(members, groupAllocationPct);
+        const sharedName        = members.find(m => m.companyName !== m.h.ticker)?.companyName ?? members[0].companyName;
+
+        for (const m of members) {
+          cards.push({
+            ticker: m.h.ticker,
+            companyName: sharedName,
+            sector: m.h.sector,
+            account: m.h.account,
+            currency: m.h.currency,
+            shares: m.h.shares,
+            avgCost: m.h.avg_cost,
+            currentPrice: m.currentPrice,
+            targetPrice: m.h.target_price,
+            pnlPct: m.h.avg_cost > 0 ? ((m.currentPrice - m.h.avg_cost) / m.h.avg_cost) * 100 : 0,
+            mktVal: m.currentPrice * m.h.shares,
+            allocationPct: totalCAD > 0 ? (m.cadValue / totalCAD) * 100 : 0,
+            beta: m.metrics?.beta ?? members.find(x => x.metrics?.beta != null)?.metrics?.beta ?? null,
+            analysis,
+            siblingCount: members.length,
+          });
+        }
+      }
+
+      cards.sort((a, b) =>
+        b.analysis.ratingScore - a.analysis.ratingScore
+        || a.ticker.localeCompare(b.ticker)
+      );
+
+      // Portfolio score: average per company (not per lot, to avoid double-counting)
+      const companyScores = [...groupMap.values()].map(members =>
+        cards.find(c => baseTickerKey(c.ticker) === baseTickerKey(members[0].h.ticker))!.analysis.ratingScore
+      );
+      const portfolioScore = companyScores.reduce((s, x) => s + x, 0) / companyScores.length;
+
+      // Warnings (deduped by company)
+      const companies = [...groupMap.values()].map(members => {
+        const card = cards.find(c => baseTickerKey(c.ticker) === baseTickerKey(members[0].h.ticker))!;
+        const groupCad = members.reduce((s, m) => s + m.cadValue, 0);
+        return { base: baseTickerKey(members[0].h.ticker), rating: card.analysis.rating, allocationPct: totalCAD > 0 ? (groupCad / totalCAD) * 100 : 0 };
       });
-
-      reviews.sort((a, b) => b.ratingScore - a.ratingScore);
-
-      const portfolioScore = reviews.reduce((s, r) => s + r.ratingScore, 0) / reviews.length;
-
       const warnings: string[] = [];
-      const exitCnt  = reviews.filter(r => r.rating === 'EXIT').length;
-      const watchCnt = reviews.filter(r => r.rating === 'WATCH').length;
-      const trimCnt  = reviews.filter(r => r.rating === 'TRIM').length;
-      const heaviest = reviews.reduce((a, b) => a.allocationPct > b.allocationPct ? a : b);
-      if (exitCnt  > 0) warnings.push(`${exitCnt} position${exitCnt > 1 ? 's' : ''} flagged for EXIT`);
-      if (watchCnt > 0) warnings.push(`${watchCnt} position${watchCnt > 1 ? 's' : ''} on WATCH`);
-      if (trimCnt  > 0) warnings.push(`${trimCnt} position${trimCnt > 1 ? 's' : ''} suggest TRIM`);
-      if (heaviest.allocationPct > 30) warnings.push(`${heaviest.ticker} is ${heaviest.allocationPct.toFixed(1)}% of portfolio`);
+      const exitCnt  = companies.filter(c => c.rating === 'EXIT').length;
+      const watchCnt = companies.filter(c => c.rating === 'WATCH').length;
+      const trimCnt  = companies.filter(c => c.rating === 'TRIM').length;
+      const heaviest = companies.reduce((a, b) => a.allocationPct > b.allocationPct ? a : b);
+      if (exitCnt  > 0) warnings.push(`${exitCnt} stock${exitCnt > 1 ? 's' : ''} flagged for EXIT`);
+      if (watchCnt > 0) warnings.push(`${watchCnt} stock${watchCnt > 1 ? 's' : ''} on WATCH`);
+      if (trimCnt  > 0) warnings.push(`${trimCnt} stock${trimCnt > 1 ? 's' : ''} suggest TRIM`);
+      if (heaviest.allocationPct > 30) warnings.push(`${heaviest.base} is ${heaviest.allocationPct.toFixed(1)}% of portfolio combined`);
 
       setResult({
-        reviews, portfolioScore, totalPnLCAD, totalCostCAD, warnings,
+        cards, portfolioScore, totalPnLCAD, totalCostCAD, warnings,
         generatedAt: new Date().toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }),
       });
     } catch (e) {
@@ -363,7 +429,7 @@ export default function PortfolioReview() {
               Portfolio Review
             </h2>
             <p className="text-xs text-zinc-500 mt-1">
-              One card per holding — one-click full analysis across all positions
+              One card per holding — same company always gets the same rating, no matter the account
             </p>
           </div>
           <button
@@ -423,7 +489,9 @@ export default function PortfolioReview() {
               <div className="text-xs text-zinc-500 mb-2">Rating Breakdown</div>
               <div className="space-y-1">
                 {(['STRONG HOLD', 'HOLD', 'TRIM', 'WATCH', 'EXIT'] as Rating[]).map(r => {
-                  const count = result.reviews.filter(x => x.rating === r).length;
+                  const count = new Set(
+                    result.cards.filter(c => c.analysis.rating === r).map(c => baseTickerKey(c.ticker))
+                  ).size;
                   if (count === 0) return null;
                   return (
                     <div key={r} className="flex items-center gap-2">
@@ -449,20 +517,25 @@ export default function PortfolioReview() {
 
           {/* Per-holding cards */}
           <div className="space-y-4">
-            {result.reviews.map(r => (
+            {result.cards.map(c => (
               <div
-                key={`${r.ticker}-${r.account}`}
-                className={`bg-zinc-900 border border-zinc-800 border-l-4 ${ratingBorder(r.rating)} rounded-xl p-5`}
+                key={`${c.ticker}-${c.account}`}
+                className={`bg-zinc-900 border border-zinc-800 border-l-4 ${ratingBorder(c.analysis.rating)} rounded-xl p-5`}
               >
                 {/* Header */}
                 <div className="flex items-start gap-3 flex-wrap">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-base font-bold text-zinc-100">{r.ticker}</span>
-                      {r.companyName !== r.ticker && (
-                        <span className="text-sm text-zinc-500">{r.companyName}</span>
+                      <span className="text-base font-bold text-zinc-100">{c.ticker}</span>
+                      {c.companyName !== c.ticker && (
+                        <span className="text-sm text-zinc-500">{c.companyName}</span>
                       )}
-                      {r.flags.map((f, i) => (
+                      {c.siblingCount > 1 && (
+                        <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/30 px-1.5 py-0.5 rounded">
+                          held in {c.siblingCount} accounts
+                        </span>
+                      )}
+                      {c.analysis.flags.map((f, i) => (
                         <span key={i} className="text-xs bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded flex items-center gap-1">
                           <AlertTriangle size={10} className="text-amber-500" />
                           {f}
@@ -470,33 +543,33 @@ export default function PortfolioReview() {
                       ))}
                     </div>
                     <div className="flex items-center gap-2 mt-1 text-xs text-zinc-500 flex-wrap">
-                      <span>{r.sector || '—'}</span>
+                      <span>{c.sector || '—'}</span>
                       <span>·</span>
-                      <span>{r.account}</span>
+                      <span>{c.account}</span>
                       <span>·</span>
-                      <span>{r.currency}</span>
+                      <span>{c.currency}</span>
                       <span>·</span>
-                      <span>{r.allocationPct.toFixed(1)}% of portfolio</span>
+                      <span>{c.allocationPct.toFixed(1)}% of portfolio</span>
                     </div>
                   </div>
-                  <div className={`flex items-center gap-1.5 border rounded-lg px-2.5 py-1.5 ${ratingColor(r.rating)}`}>
-                    {ratingIcon(r.rating)}
-                    <span className="text-xs font-semibold">{r.rating}</span>
+                  <div className={`flex items-center gap-1.5 border rounded-lg px-2.5 py-1.5 ${ratingColor(c.analysis.rating)}`}>
+                    {ratingIcon(c.analysis.rating)}
+                    <span className="text-xs font-semibold">{c.analysis.rating}</span>
                   </div>
                 </div>
 
-                <div className="mt-3"><ScoreBar score={r.ratingScore} /></div>
+                <div className="mt-3"><ScoreBar score={c.analysis.ratingScore} /></div>
 
-                {/* Key metrics */}
+                {/* Key metrics — this holding only */}
                 <div className="mt-3 grid grid-cols-3 sm:grid-cols-6 gap-2">
                   {[
-                    { label: 'Price',    value: `$${fmt2(r.currentPrice)}` },
-                    { label: 'Avg Cost', value: `$${fmt2(r.avgCost)}` },
-                    { label: 'P&L',      value: `${r.pnlPct >= 0 ? '+' : ''}${fmt2(r.pnlPct, 1)}%`, color: r.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400' },
-                    { label: 'Shares',   value: Math.round(r.shares).toLocaleString() },
-                    { label: 'Mkt Val',  value: `$${Math.round(r.mktVal).toLocaleString()}` },
-                    { label: r.targetPrice ? 'Target' : 'Beta',
-                      value: r.targetPrice ? `$${fmt2(r.targetPrice)}` : (r.metrics?.beta != null ? r.metrics.beta.toFixed(2) : '—') },
+                    { label: `Price (${c.currency})`,    value: `$${fmt2(c.currentPrice)}` },
+                    { label: 'Avg Cost', value: `$${fmt2(c.avgCost)}` },
+                    { label: 'P&L',      value: `${c.pnlPct >= 0 ? '+' : ''}${fmt2(c.pnlPct, 1)}%`, color: c.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400' },
+                    { label: 'Shares',   value: Math.round(c.shares).toLocaleString() },
+                    { label: 'Mkt Val',  value: `$${Math.round(c.mktVal).toLocaleString()}` },
+                    { label: c.targetPrice ? 'Target' : 'Beta',
+                      value: c.targetPrice ? `$${fmt2(c.targetPrice)}` : (c.beta != null ? c.beta.toFixed(2) : '—') },
                   ].map(({ label, value, color }) => (
                     <div key={label} className="bg-zinc-800/60 rounded-lg p-2">
                       <div className="text-xs text-zinc-500">{label}</div>
@@ -505,15 +578,15 @@ export default function PortfolioReview() {
                   ))}
                 </div>
 
-                {/* Pros / Cons */}
+                {/* Pros / Cons — company-level, shared across accounts */}
                 <div className="mt-4 grid sm:grid-cols-2 gap-3">
                   <div>
                     <div className="text-xs font-medium text-emerald-500 flex items-center gap-1.5 mb-2">
                       <TrendingUp size={12} /> What's Going Well
                     </div>
-                    {r.pros.length === 0
+                    {c.analysis.pros.length === 0
                       ? <p className="text-xs text-zinc-600 italic">No notable positives</p>
-                      : <ul className="space-y-1">{r.pros.map((p, i) => (
+                      : <ul className="space-y-1">{c.analysis.pros.map((p, i) => (
                           <li key={i} className="flex items-start gap-1.5 text-xs text-zinc-300">
                             <CheckCircle size={11} className="text-emerald-500 mt-0.5 shrink-0" />{p}
                           </li>
@@ -524,11 +597,11 @@ export default function PortfolioReview() {
                     <div className="text-xs font-medium text-red-500 flex items-center gap-1.5 mb-2">
                       <TrendingDown size={12} /> Areas of Concern
                     </div>
-                    {r.cons.length === 0
+                    {c.analysis.cons.length === 0
                       ? <p className="text-xs text-zinc-600 italic">No notable concerns</p>
-                      : <ul className="space-y-1">{r.cons.map((c, i) => (
+                      : <ul className="space-y-1">{c.analysis.cons.map((x, i) => (
                           <li key={i} className="flex items-start gap-1.5 text-xs text-zinc-300">
-                            <XCircle size={11} className="text-red-500 mt-0.5 shrink-0" />{c}
+                            <XCircle size={11} className="text-red-500 mt-0.5 shrink-0" />{x}
                           </li>
                         ))}</ul>
                     }
@@ -540,7 +613,7 @@ export default function PortfolioReview() {
                   <Zap size={12} className="text-blue-400 mt-0.5 shrink-0" />
                   <div>
                     <span className="text-xs font-medium text-blue-400">Suggested Action: </span>
-                    <span className="text-xs text-zinc-300">{r.action}</span>
+                    <span className="text-xs text-zinc-300">{c.analysis.action}</span>
                   </div>
                 </div>
               </div>
