@@ -408,16 +408,18 @@ export default function PortfolioReview() {
         })
       );
 
-      const fulfilled = results
-        .filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof Promise.resolve<{
-          h: Holding;
-          quote: FinnhubQuote | null;
-          metrics: FinnhubMetrics['metric'] | null;
-          profile: FinnhubProfile | null;
-          currentPrice: number;
-          cadValue: number;
-          costCAD: number;
-        }>>> => r.status === 'fulfilled')
+      type HoldingData = {
+        h: Holding;
+        quote: FinnhubQuote | null;
+        metrics: FinnhubMetrics['metric'] | null;
+        profile: FinnhubProfile | null;
+        currentPrice: number;
+        cadValue: number;
+        costCAD: number;
+      };
+
+      const fulfilled = (results
+        .filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<HoldingData>[])
         .map(r => r.value);
 
       const totalValueCAD = fulfilled.reduce((s, r) => s + r.cadValue, 0);
