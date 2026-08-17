@@ -16,6 +16,38 @@ const SECTION_COLORS: Record<string, string> = {
   otherAssets:  '#8b5cf6',
 };
 
+const GOALS_KEY = 'swing_nw_goals';
+
+interface FinGoal {
+  id:      string;
+  icon:    string;
+  name:    string;
+  year:    string;
+  target:  number;
+  current: number;
+}
+
+const GOAL_COLORS = ['#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#06b6d4', '#ec4899'];
+
+const TICKER_CHIP_COLORS = [
+  'bg-emerald-700', 'bg-blue-700', 'bg-violet-700', 'bg-amber-700',
+  'bg-cyan-700', 'bg-pink-700', 'bg-indigo-700', 'bg-teal-700',
+];
+
+const RADIAN = Math.PI / 180;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function pieLabel({ cx, cy, midAngle, innerRadius, outerRadius, percent }: any) {
+  if (percent < 0.05) return null;
+  const r = (innerRadius + outerRadius) / 2;
+  const x = cx + r * Math.cos(-midAngle * RADIAN);
+  const y = cy + r * Math.sin(-midAngle * RADIAN);
+  return (
+    <text x={x} y={y} fill="#ffffff" fontSize={12} fontWeight={700} textAnchor="middle" dominantBaseline="central">
+      {(percent * 100).toFixed(0)}%
+    </text>
+  );
+}
+
 /** Small percentage ring for the hero bar */
 function Ring({ pct, color }: { pct: number; color: string }) {
   const r = 15;
@@ -125,8 +157,43 @@ export default function NetWorth() {
   const [editId, setEditId]     = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Partial<Row>>({});
   const [portfolioAccounts, setPortfolioAccounts] = useState<PortfolioAccount[]>([]);
+  const [topHoldings, setTopHoldings] = useState<Array<{ ticker: string; sector: string; valueCAD: number; pnlPct: number | null }>>([]);
   const [usdCadRate, setUsdCadRate] = useState<number>(getUsdCadCached);
   const [syncing, setSyncing]   = useState(false);
+
+  // ── Financial goals (localStorage) ──────────────────────────────────────
+  const [finGoals, setFinGoals] = useState<FinGoal[]>(() => {
+    try { return JSON.parse(localStorage.getItem(GOALS_KEY) ?? '[]'); } catch { return []; }
+  });
+  const [editGoalId, setEditGoalId]   = useState<string | null>(null);
+  const [goalForm, setGoalForm]       = useState<Partial<FinGoal>>({});
+
+  function saveGoals(next: FinGoal[]) {
+    setFinGoals(next);
+    localStorage.setItem(GOALS_KEY, JSON.stringify(next));
+  }
+  function addGoal() {
+    const g: FinGoal = { id: newId(), icon: '🎯', name: '', year: '', target: 0, current: 0 };
+    saveGoals([...finGoals, g]);
+    setEditGoalId(g.id);
+    setGoalForm({ ...g });
+  }
+  function commitGoal2() {
+    if (!editGoalId) return;
+    saveGoals(finGoals.map(g => g.id === editGoalId ? {
+      ...g,
+      icon:    (goalForm.icon ?? '🎯').slice(0, 4) || '🎯',
+      name:    goalForm.name ?? '',
+      year:    goalForm.year ?? '',
+      target:  Number(goalForm.target ?? 0),
+      current: Number(goalForm.current ?? 0),
+    } : g));
+    setEditGoalId(null); setGoalForm({});
+  }
+  function deleteGoal(id: string) {
+    if (!window.confirm('Delete this goal?')) return;
+    saveGoals(finGoals.filter(g => g.id !== id));
+  }
 
   // Live USD/CAD rate on mount (still user-editable afterwards)
   useEffect(() => {
@@ -172,16 +239,34 @@ export default function NetWorth() {
         try { return JSON.parse(localStorage.getItem('swing_live_prices') ?? '{}'); } catch { return {}; }
       })();
       const map: Record<string, number> = {};
+      const byTicker: Record<string, { sector: string; valueCAD: number; costCAD: number }> = {};
       holdings.forEach(h => {
         // Same priority as Portfolio tab: manual → live → avg_cost
         const price    = manualPrices[h.ticker] ?? livePrices[h.ticker]?.price ?? h.avg_cost;
-        const valueCAD = h.shares * price * (h.currency === 'USD' ? usdCadRate : 1);
+        const fx       = h.currency === 'USD' ? usdCadRate : 1;
+        const valueCAD = h.shares * price * fx;
         map[h.account] = (map[h.account] ?? 0) + valueCAD;
+
+        const t = byTicker[h.ticker] ?? { sector: h.sector, valueCAD: 0, costCAD: 0 };
+        t.valueCAD += valueCAD;
+        t.costCAD  += h.shares * h.avg_cost * fx;
+        byTicker[h.ticker] = t;
       });
       setPortfolioAccounts(
         Object.entries(map)
           .filter(([, v]) => v > 0)
           .map(([account, valueCAD]) => ({ account, description: ACCOUNT_DESCRIPTIONS[account] ?? account, valueCAD }))
+          .sort((a, b) => b.valueCAD - a.valueCAD)
+      );
+      setTopHoldings(
+        Object.entries(byTicker)
+          .filter(([, t]) => t.valueCAD > 0)
+          .map(([ticker, t]) => ({
+            ticker,
+            sector: t.sector || '—',
+            valueCAD: t.valueCAD,
+            pnlPct: t.costCAD > 0 ? ((t.valueCAD - t.costCAD) / t.costCAD) * 100 : null,
+          }))
           .sort((a, b) => b.valueCAD - a.valueCAD)
       );
     } finally { setSyncing(false); }
@@ -383,33 +468,36 @@ export default function NetWorth() {
         );
       })()}
 
-      {/* ── Allocation donut + breakdown ───────────────────────────────────── */}
-      {totalAssets > 0 && (() => {
-        const slices = SECTIONS
-          .filter(s => s.key !== 'liabilities')
-          .map(({ key, label }) => ({
-            key, label,
-            value: key === 'investments' ? investmentTotal : sub(key).value,
-            color: SECTION_COLORS[key] ?? '#71717a',
-          }))
-          .filter(s => s.value > 0);
-        return (
-          <div className="card">
-            <div className="text-xs font-bold text-zinc-300 uppercase tracking-widest mb-1">Asset Allocation</div>
-            <div className="text-xs text-zinc-600 mb-3">By asset class</div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
-              {/* Donut */}
-              <div className="h-52">
+      {/* ── Allocation donut + Financial Goals (side by side) ──────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
+
+        {/* Asset allocation */}
+        {totalAssets > 0 && (() => {
+          const slices = SECTIONS
+            .filter(s => s.key !== 'liabilities')
+            .map(({ key, label }) => ({
+              key, label,
+              value: key === 'investments' ? investmentTotal : sub(key).value,
+              color: SECTION_COLORS[key] ?? '#71717a',
+            }))
+            .filter(s => s.value > 0);
+          return (
+            <div className="card">
+              <div className="text-sm font-bold text-zinc-100 uppercase tracking-wide mb-0.5">Portfolio Allocation</div>
+              <div className="text-xs text-zinc-600 mb-3">By asset class</div>
+              <div className="h-56">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
                       data={slices}
                       dataKey="value"
                       nameKey="label"
-                      innerRadius="55%"
-                      outerRadius="85%"
+                      innerRadius="50%"
+                      outerRadius="88%"
                       paddingAngle={2}
                       stroke="none"
+                      label={pieLabel}
+                      labelLine={false}
                     >
                       {slices.map(s => <Cell key={s.key} fill={s.color} />)}
                     </Pie>
@@ -421,34 +509,171 @@ export default function NetWorth() {
                   </PieChart>
                 </ResponsiveContainer>
               </div>
-              {/* Legend / breakdown bars */}
-              <div className="space-y-2.5">
+              {/* Legend */}
+              <div className="mt-3 space-y-2">
                 {slices.map(({ key, label, value, color }) => {
                   const pct = totalAssets > 0 ? (value / totalAssets) * 100 : 0;
                   return (
-                    <div key={key} className="flex items-center gap-3 text-xs">
+                    <div key={key} className="flex items-center gap-2.5 text-xs">
                       <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
-                      <span className="text-zinc-300 w-28 flex-shrink-0 font-medium">{label}</span>
-                      <div className="flex-1 bg-zinc-800 rounded-full h-2">
-                        <div className="h-2 rounded-full" style={{ width: `${pct}%`, background: color }} />
-                      </div>
-                      <span className="text-zinc-200 tabular-nums w-24 text-right font-medium">{fmt$(value, false)}</span>
-                      <span className="text-zinc-500 tabular-nums w-11 text-right">{pct.toFixed(1)}%</span>
+                      <span className="text-zinc-300 font-medium flex-1">{label}</span>
+                      <span className="text-zinc-200 tabular-nums font-medium">{fmt$(value, false)}</span>
+                      <span className="text-zinc-500 tabular-nums w-11 text-right font-semibold">{pct.toFixed(0)}%</span>
                     </div>
                   );
                 })}
-                <div className="pt-2 mt-1 border-t border-zinc-800 flex items-center gap-3 text-xs">
-                  <span className="w-2.5 h-2.5 shrink-0" />
-                  <span className="text-zinc-200 font-bold w-28 flex-shrink-0">Total Assets</span>
-                  <div className="flex-1" />
-                  <span className="text-zinc-100 tabular-nums w-24 text-right font-bold">{fmt$(totalAssets, false)}</span>
-                  <span className="text-zinc-600 tabular-nums w-11 text-right">100%</span>
-                </div>
+              </div>
+              <div className="mt-4 bg-emerald-950/30 border border-emerald-900/40 rounded-lg px-3 py-2.5 flex items-start gap-2">
+                <Target size={13} className="text-emerald-500 mt-0.5 shrink-0" />
+                <span className="text-xs text-emerald-300/80">Stay diversified. Good portfolios balance risk and reward over time.</span>
               </div>
             </div>
+          );
+        })()}
+
+        {/* Financial goals */}
+        <div className="card">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <div className="text-sm font-bold text-zinc-100 uppercase tracking-wide mb-0.5">Financial Goals</div>
+              <div className="text-xs text-zinc-600">Goal · target · progress</div>
+            </div>
+            <button onClick={addGoal} className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-emerald-400 transition-colors px-2 py-1 rounded-lg hover:bg-zinc-800">
+              <Plus size={12} /> Add goal
+            </button>
           </div>
-        );
-      })()}
+
+          {finGoals.length === 0 ? (
+            <div className="text-xs text-zinc-600 py-6 text-center">
+              No goals yet — add Retirement, House Down Payment, Emergency Fund…
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-800/60">
+              {finGoals.map((g, i) => {
+                const color = GOAL_COLORS[i % GOAL_COLORS.length];
+                const pct   = g.target > 0 ? Math.min((g.current / g.target) * 100, 100) : 0;
+                const editing = editGoalId === g.id;
+                if (editing) return (
+                  <div key={g.id} className="py-3 space-y-2">
+                    <div className="flex gap-2">
+                      <input className="input-base text-xs w-12 text-center" value={goalForm.icon ?? ''} maxLength={4}
+                        onChange={e => setGoalForm(f => ({ ...f, icon: e.target.value }))} placeholder="🎯" title="Emoji" />
+                      <input className="input-base text-xs flex-1" value={goalForm.name ?? ''}
+                        onChange={e => setGoalForm(f => ({ ...f, name: e.target.value }))} placeholder="Goal name (e.g. Retirement)" />
+                      <input className="input-base text-xs w-20" value={goalForm.year ?? ''}
+                        onChange={e => setGoalForm(f => ({ ...f, year: e.target.value }))} placeholder="Year" />
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <label className="text-xs text-zinc-500 w-14">Target $</label>
+                      <input type="number" className="input-base text-xs flex-1 tabular-nums" value={goalForm.target ?? 0}
+                        onChange={e => setGoalForm(f => ({ ...f, target: parseFloat(e.target.value) || 0 }))} />
+                      <label className="text-xs text-zinc-500 w-14">Saved $</label>
+                      <input type="number" className="input-base text-xs flex-1 tabular-nums" value={goalForm.current ?? 0}
+                        onChange={e => setGoalForm(f => ({ ...f, current: parseFloat(e.target.value) || 0 }))} />
+                      <button onClick={commitGoal2} className="text-emerald-400 hover:text-emerald-300 p-1"><Check size={14} /></button>
+                      <button onClick={() => { setEditGoalId(null); setGoalForm({}); }} className="text-zinc-500 hover:text-zinc-300 p-1"><X size={14} /></button>
+                    </div>
+                  </div>
+                );
+                return (
+                  <div key={g.id} className="py-3 flex items-center gap-3 group">
+                    <span className="text-lg w-8 text-center shrink-0">{g.icon || '🎯'}</span>
+                    <div className="w-32 shrink-0">
+                      <div className="text-xs font-semibold text-zinc-200 leading-tight">{g.name || <span className="text-zinc-600 italic">Unnamed</span>}</div>
+                      <div className="text-xs text-zinc-600">{g.year || 'Ongoing'}</div>
+                    </div>
+                    <div className="text-xs text-zinc-400 tabular-nums w-24 shrink-0 text-right">{fmt$(g.target, false)}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs tabular-nums mb-1" style={{ color }}>{fmt$(g.current, false)}</div>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 bg-zinc-800 rounded-full h-2 overflow-hidden">
+                          <div className="h-2 rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: color }} />
+                        </div>
+                        <span className="text-xs tabular-nums text-zinc-400 w-9 text-right font-semibold">{pct.toFixed(0)}%</span>
+                      </div>
+                    </div>
+                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                      <button onClick={() => { setEditGoalId(g.id); setGoalForm({ ...g }); }} className="btn-ghost p-1" title="Edit"><Pencil size={11} /></button>
+                      <button onClick={() => deleteGoal(g.id)} className="btn-danger" title="Delete"><Trash2 size={11} /></button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="mt-3 bg-blue-950/30 border border-blue-900/40 rounded-lg px-3 py-2.5 flex items-start gap-2">
+            <Target size={13} className="text-blue-400 mt-0.5 shrink-0" />
+            <span className="text-xs text-blue-300/80">A goal without a plan is just a wish. Stay consistent and keep building.</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Top Holdings ───────────────────────────────────────────────────── */}
+      {topHoldings.length > 0 && (
+        <div className="card">
+          <div className="text-sm font-bold text-zinc-100 uppercase tracking-wide mb-0.5">Top Holdings</div>
+          <div className="text-xs text-zinc-600 mb-3">By percentage of investments</div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-zinc-500 border-b border-zinc-800">
+                  <th className="text-left pb-2 font-medium">Ticker</th>
+                  <th className="text-left pb-2 font-medium">Sector</th>
+                  <th className="text-right pb-2 font-medium">% of Portfolio</th>
+                  <th className="text-right pb-2 font-medium">Value</th>
+                  <th className="text-right pb-2 font-medium">P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/60">
+                {topHoldings.slice(0, 8).map((h, i) => {
+                  const pct = investmentTotal > 0 ? (h.valueCAD / investmentTotal) * 100 : 0;
+                  return (
+                    <tr key={h.ticker} className="tr-hover">
+                      <td className="py-2">
+                        <span className={`inline-block ${TICKER_CHIP_COLORS[i % TICKER_CHIP_COLORS.length]} text-white font-mono font-bold px-2 py-0.5 rounded text-xs`}>
+                          {h.ticker}
+                        </span>
+                      </td>
+                      <td className="py-2 text-zinc-400">{h.sector}</td>
+                      <td className="py-2 text-right tabular-nums">
+                        <div className="flex items-center justify-end gap-2">
+                          <div className="w-20 bg-zinc-800 rounded-full h-1.5 hidden sm:block">
+                            <div className="bg-blue-500 h-1.5 rounded-full" style={{ width: `${Math.min(pct, 100)}%` }} />
+                          </div>
+                          <span className="text-zinc-200 font-semibold w-12">{pct.toFixed(1)}%</span>
+                        </div>
+                      </td>
+                      <td className="py-2 text-right tabular-nums text-zinc-100 font-medium">{fmt$(h.valueCAD, false)}</td>
+                      <td className={`py-2 text-right tabular-nums font-semibold ${h.pnlPct == null ? 'text-zinc-600' : h.pnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {h.pnlPct == null ? '—' : `${h.pnlPct >= 0 ? '▲ +' : '▼ −'}${Math.abs(h.pnlPct).toFixed(1)}%`}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {topHoldings.length > 8 && (
+                  <tr>
+                    <td className="py-2">
+                      <span className="inline-block bg-zinc-700 text-zinc-300 font-mono font-bold px-2 py-0.5 rounded text-xs">
+                        +{topHoldings.length - 8} more
+                      </span>
+                    </td>
+                    <td className="py-2 text-zinc-500">Other holdings</td>
+                    <td className="py-2 text-right tabular-nums text-zinc-400 font-semibold pr-0">
+                      {((topHoldings.slice(8).reduce((s, h) => s + h.valueCAD, 0) / (investmentTotal || 1)) * 100).toFixed(1)}%
+                    </td>
+                    <td className="py-2 text-right tabular-nums text-zinc-300">{fmt$(topHoldings.slice(8).reduce((s, h) => s + h.valueCAD, 0), false)}</td>
+                    <td className="py-2 text-right text-zinc-600">—</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-3 text-xs text-zinc-600 flex items-center gap-1.5">
+            ☆ Holdings will change over time. Review your portfolio regularly.
+          </div>
+        </div>
+      )}
 
       {/* ── Sections ───────────────────────────────────────────────────────── */}
       {SECTIONS.map(({ key, label, num }) => {
