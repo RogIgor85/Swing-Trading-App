@@ -87,14 +87,20 @@ function analyzeCompany(members: RawRow[], groupAllocationPct: number): CompanyA
   const pros: string[] = [];
   const cons: string[] = [];
   const flags: string[] = [];
-  let score = 5;
+
+  // ETFs/index funds are core diversified holdings, not swing positions —
+  // single-stock rules (fundamentals, concentration, trim) don't apply
+  const isEtf = members.some(x => /\b(etf|index|fund)\b/i.test(x.companyName));
+  let score = isEtf ? 6.5 : 5;
+  if (isEtf) pros.push('Diversified fund — holds hundreds of stocks, single-stock risk rules don\'t apply');
 
   const totalCadValue = members.reduce((s, m) => s + m.cadValue, 0);
   const totalCostCAD  = members.reduce((s, m) => s + m.costCAD, 0);
   const totalPnLPct   = totalCostCAD > 0 ? ((totalCadValue - totalCostCAD) / totalCostCAD) * 100 : 0;
 
-  // Metrics: prefer a member that has them (they're all the same company)
-  const m = members.find(x => x.metrics != null)?.metrics ?? null;
+  // Metrics: prefer a member that has them (they're all the same company).
+  // For ETFs, per-company fundamentals are meaningless — skip them entirely.
+  const m = isEtf ? null : members.find(x => x.metrics != null)?.metrics ?? null;
   // USD reference price for technical checks — same currency as Finnhub metrics
   const usdPrice = members.find(x => x.usdRefPrice != null)?.usdRefPrice ?? null;
 
@@ -200,8 +206,12 @@ function analyzeCompany(members: RawRow[], groupAllocationPct: number): CompanyA
   }
 
   // ── Concentration (combined weight across accounts) ───────────────────────
-  if (groupAllocationPct > 30)      { flags.push(`${groupAllocationPct.toFixed(1)}% of portfolio combined`); cons.push(`Overweight (${groupAllocationPct.toFixed(1)}% of portfolio across accounts) — concentration risk`); score -= 0.5; }
-  else if (groupAllocationPct > 20) { flags.push(`${groupAllocationPct.toFixed(1)}% of portfolio combined`); }
+  // Not applied to broad ETFs — a large allocation to a diversified fund is
+  // the point, not a risk
+  if (!isEtf) {
+    if (groupAllocationPct > 30)      { flags.push(`${groupAllocationPct.toFixed(1)}% of portfolio combined`); cons.push(`Overweight (${groupAllocationPct.toFixed(1)}% of portfolio across accounts) — concentration risk`); score -= 0.5; }
+    else if (groupAllocationPct > 20) { flags.push(`${groupAllocationPct.toFixed(1)}% of portfolio combined`); }
+  }
 
   // ── Upcoming earnings ─────────────────────────────────────────────────────
   const earningsDate = members.find(x => x.earningsDate)?.earningsDate ?? null;
@@ -226,7 +236,14 @@ function analyzeCompany(members: RawRow[], groupAllocationPct: number): CompanyA
 
   let rating: Rating;
   let action: string;
-  if (score >= 7.5)      { rating = 'STRONG HOLD'; action = 'High-conviction position. Consider adding on pullbacks. Maintain or increase allocation.'; }
+  if (isEtf) {
+    // Broad funds are buy-and-hold by design — never TRIM/EXIT on stock rules
+    rating = score >= 7.5 ? 'STRONG HOLD' : 'HOLD';
+    action = totalPnLPct < -15
+      ? 'Broad market is down — stay the course and keep contributing unless your timeline has changed. Drawdowns are normal for index funds.'
+      : 'Core diversified holding — keep contributing on schedule. No action needed.';
+  }
+  else if (score >= 7.5) { rating = 'STRONG HOLD'; action = 'High-conviction position. Consider adding on pullbacks. Maintain or increase allocation.'; }
   else if (score >= 6)   { rating = 'HOLD';        action = 'Continue holding. Set a trailing stop 8–10% below current price to protect gains.'; }
   else if (score >= 4.5) { rating = 'TRIM';        action = 'Consider reducing position by 25–50% to lock in gains or limit further downside.'; }
   else if (score >= 3)   { rating = 'WATCH';       action = 'Monitor closely. Revisit original thesis. Be prepared to exit if price breaks below key support.'; }
