@@ -425,11 +425,17 @@ export default function PortfolioReview() {
         || a.ticker.localeCompare(b.ticker)
       );
 
-      // Portfolio score: average per company (not per lot, to avoid double-counting)
-      const companyScores = [...groupMap.values()].map(members =>
-        cards.find(c => baseTickerKey(c.ticker) === baseTickerKey(members[0].h.ticker))!.analysis.ratingScore
-      );
-      const portfolioScore = companyScores.reduce((s, x) => s + x, 0) / companyScores.length;
+      // Portfolio score: VALUE-WEIGHTED by CAD market value — a $150K core
+      // holding moves the needle proportionally more than a $5K legacy position
+      const weighted = [...groupMap.values()].map(members => {
+        const score = cards.find(c => baseTickerKey(c.ticker) === baseTickerKey(members[0].h.ticker))!.analysis.ratingScore;
+        const cad   = members.reduce((s, m) => s + m.cadValue, 0);
+        return { score, cad };
+      });
+      const totalWeight    = weighted.reduce((s, w) => s + w.cad, 0);
+      const portfolioScore = totalWeight > 0
+        ? weighted.reduce((s, w) => s + w.score * w.cad, 0) / totalWeight
+        : weighted.reduce((s, w) => s + w.score, 0) / (weighted.length || 1);
 
       // Warnings (deduped by company)
       const companies = [...groupMap.values()].map(members => {
@@ -548,7 +554,7 @@ export default function PortfolioReview() {
                 {portfolioLabel(result.portfolioScore).text}
               </div>
               <div className="mt-2"><ScoreBar score={result.portfolioScore} /></div>
-              <div className="text-xs text-zinc-600 mt-1">avg {result.portfolioScore.toFixed(1)} / 10</div>
+              <div className="text-xs text-zinc-600 mt-1">{result.portfolioScore.toFixed(1)} / 10 · weighted by position size</div>
             </div>
 
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
