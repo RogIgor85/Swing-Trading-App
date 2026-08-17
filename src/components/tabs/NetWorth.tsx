@@ -1,10 +1,53 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, Trash2, Check, X, Pencil, RefreshCw, Target } from 'lucide-react';
+import { Plus, Trash2, Check, X, Pencil, RefreshCw, Target, TrendingUp, TrendingDown } from 'lucide-react';
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { getUsdCad, getUsdCadCached } from '../../lib/fx';
 import type { Holding } from '../../types';
 
 const TABLE = 'net_worth_items';
+const HISTORY_KEY = 'swing_nw_history';
+
+const SECTION_COLORS: Record<string, string> = {
+  investments:  '#3b82f6',
+  realProperty: '#10b981',
+  vehicles:     '#f59e0b',
+  bankAccounts: '#06b6d4',
+  otherAssets:  '#8b5cf6',
+};
+
+/** Small percentage ring for the hero bar */
+function Ring({ pct, color }: { pct: number; color: string }) {
+  const r = 15;
+  const c = 2 * Math.PI * r;
+  const filled = (Math.min(Math.max(pct, 0), 100) / 100) * c;
+  return (
+    <svg width="42" height="42" viewBox="0 0 42 42" className="-rotate-90 shrink-0">
+      <circle cx="21" cy="21" r={r} fill="none" stroke="#27272a" strokeWidth="5" />
+      <circle cx="21" cy="21" r={r} fill="none" stroke={color} strokeWidth="5"
+        strokeDasharray={`${filled} ${c}`} strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Tiny sparkline from monthly net-worth history */
+function Spark({ values }: { values: number[] }) {
+  if (values.length < 2) return null;
+  const w = 96, h = 28, pad = 2;
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = max - min || 1;
+  const pts = values.map((v, i) => {
+    const x = pad + (i / (values.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((v - min) / range) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const up = values[values.length - 1] >= values[0];
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="shrink-0">
+      <polyline points={pts} fill="none" stroke={up ? '#34d399' : '#f87171'} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
 
 function fmt$(n: number, showDash = true) {
   if (showDash && n === 0) return '—';
@@ -176,17 +219,35 @@ export default function NetWorth() {
     setStore(prev => ({ ...prev, [section]: (prev[section as keyof Store] as Row[]).filter(r => r.id !== id) }));
   }
 
-  if (loading) return (
-    <div className="flex items-center justify-center py-20 text-zinc-500 text-sm gap-2">
-      <RefreshCw size={14} className="animate-spin" /> Loading Net Worth…
-    </div>
-  );
-
   // Totals — investments come from portfolio sync, rest from manual store
   const investmentTotal = portfolioAccounts.reduce((s, a) => s + a.valueCAD, 0);
   const totalAssets = MANUAL_ASSET_SECTIONS.flatMap(s => (store[s as keyof Store] as Row[])).reduce((s, r) => s + r.value, 0) + investmentTotal;
   const totalDebt   = [...MANUAL_ASSET_SECTIONS, 'liabilities' as SectionKey].flatMap(s => (store[s as keyof Store] as Row[])).reduce((s, r) => s + r.debt, 0);
   const netWorth    = totalAssets - totalDebt;
+
+  // ── Monthly history (localStorage) — powers Monthly Change + sparkline ──
+  const [history, setHistory] = useState<Record<string, number>>(() => {
+    try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '{}'); } catch { return {}; }
+  });
+  useEffect(() => {
+    if (loading || netWorth === 0) return;
+    const monthKey = new Date().toISOString().slice(0, 7); // YYYY-MM
+    setHistory(prev => {
+      if (prev[monthKey] === netWorth) return prev;
+      const next = { ...prev, [monthKey]: netWorth };
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, [netWorth, loading]);
+
+  const histMonths  = Object.keys(history).sort();
+  const histValues  = histMonths.slice(-12).map(m => history[m]);
+  const prevMonthNW = histMonths.length >= 2 ? history[histMonths[histMonths.length - 2]] : null;
+  const monthDelta  = prevMonthNW != null ? netWorth - prevMonthNW : null;
+  const monthPct    = prevMonthNW != null && prevMonthNW !== 0 ? ((netWorth - prevMonthNW) / Math.abs(prevMonthNW)) * 100 : null;
+
+  const cashTotal = (store.bankAccounts as Row[]).reduce((s, r) => s + r.value, 0);
+  const pctOfNW   = (v: number) => netWorth > 0 ? (v / netWorth) * 100 : 0;
 
   function sub(section: SectionKey) {
     if (section === 'investments') return { value: investmentTotal, debt: 0 };
@@ -194,25 +255,92 @@ export default function NetWorth() {
     return { value: rows.reduce((s, r) => s + r.value, 0), debt: rows.reduce((s, r) => s + r.debt, 0) };
   }
 
+  if (loading) return (
+    <div className="flex items-center justify-center py-20 text-zinc-500 text-sm gap-2">
+      <RefreshCw size={14} className="animate-spin" /> Loading Net Worth…
+    </div>
+  );
+
   return (
     <div className="space-y-5">
 
-      {/* ── Summary cards ──────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="card py-3">
-          <div className="text-xs text-zinc-500 mb-1">Total Assets</div>
-          <div className="text-xl font-bold text-zinc-100">{fmt$(totalAssets, false)}</div>
-        </div>
-        <div className="card py-3">
-          <div className="text-xs text-zinc-500 mb-1">Total Debt</div>
-          <div className="text-xl font-bold text-red-400">{fmt$(totalDebt, false)}</div>
-        </div>
-        <div className={`card py-3 col-span-2 ${netWorth >= 0 ? 'border-emerald-800' : 'border-red-800'}`}>
-          <div className="text-xs text-zinc-500 mb-1">Net Worth</div>
-          <div className={`text-2xl font-bold ${netWorth >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {fmt$(netWorth, false)}
+      {/* ── Hero summary bar ───────────────────────────────────────────────── */}
+      <div className="rounded-2xl border border-blue-900/60 bg-gradient-to-br from-zinc-900 via-zinc-900 to-blue-950/50 px-5 py-4">
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-x-6 gap-y-4 lg:divide-x lg:divide-zinc-800">
+
+          {/* Total net worth */}
+          <div className="col-span-2 lg:col-span-1 lg:pr-2">
+            <div className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-1">Total Net Worth</div>
+            <div className={`text-3xl font-extrabold tabular-nums ${netWorth >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {fmt$(netWorth, false)}
+            </div>
+            {monthDelta != null && (
+              <div className={`flex items-center gap-1 text-xs mt-1 tabular-nums ${monthDelta >= 0 ? 'text-emerald-500' : 'text-red-400'}`}>
+                {monthDelta >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                {monthDelta >= 0 ? '+' : '−'}{fmt$(Math.abs(monthDelta), false)}
+                {monthPct != null && ` (${Math.abs(monthPct).toFixed(1)}%)`}
+                <span className="text-zinc-600 ml-1">vs. last month</span>
+              </div>
+            )}
           </div>
-          <div className="text-xs text-zinc-600 mt-0.5">{fmt$(totalAssets, false)} assets − {fmt$(totalDebt, false)} debt</div>
+
+          {/* Investments */}
+          <div className="lg:px-4">
+            <div className="text-[11px] font-bold text-zinc-500 uppercase tracking-widest mb-1">Investments</div>
+            <div className="text-xl font-bold text-zinc-100 tabular-nums">{fmt$(investmentTotal, false)}</div>
+            <div className="flex items-center gap-2 mt-1.5">
+              <Ring pct={pctOfNW(investmentTotal)} color="#3b82f6" />
+              <div className="text-xs text-zinc-500 leading-tight">
+                <span className="text-blue-400 font-semibold">{pctOfNW(investmentTotal).toFixed(0)}%</span><br />of net worth
+              </div>
+            </div>
+          </div>
+
+          {/* Cash */}
+          <div className="lg:px-4">
+            <div className="text-[11px] font-bold text-zinc-500 uppercase tracking-widest mb-1">Cash</div>
+            <div className="text-xl font-bold text-zinc-100 tabular-nums">{fmt$(cashTotal, false)}</div>
+            <div className="flex items-center gap-2 mt-1.5">
+              <Ring pct={pctOfNW(cashTotal)} color="#06b6d4" />
+              <div className="text-xs text-zinc-500 leading-tight">
+                <span className="text-cyan-400 font-semibold">{pctOfNW(cashTotal).toFixed(0)}%</span><br />of net worth
+              </div>
+            </div>
+          </div>
+
+          {/* Debt */}
+          <div className="lg:px-4">
+            <div className="text-[11px] font-bold text-zinc-500 uppercase tracking-widest mb-1">Debt</div>
+            <div className="text-xl font-bold text-red-400 tabular-nums">{fmt$(totalDebt, false)}</div>
+            <div className="flex items-center gap-2 mt-1.5">
+              <Ring pct={pctOfNW(totalDebt)} color="#f87171" />
+              <div className="text-xs text-zinc-500 leading-tight">
+                <span className="text-red-400 font-semibold">{pctOfNW(totalDebt).toFixed(0)}%</span><br />of net worth
+              </div>
+            </div>
+          </div>
+
+          {/* Monthly change */}
+          <div className="lg:pl-4">
+            <div className="text-[11px] font-bold text-zinc-500 uppercase tracking-widest mb-1">Monthly Change</div>
+            {monthDelta != null ? (
+              <>
+                <div className={`text-xl font-bold tabular-nums ${monthDelta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {monthDelta >= 0 ? '▲ +' : '▼ −'}{fmt$(Math.abs(monthDelta), false)}
+                </div>
+                {monthPct != null && (
+                  <div className={`text-xs tabular-nums ${monthDelta >= 0 ? 'text-emerald-500' : 'text-red-400'}`}>
+                    {Math.abs(monthPct).toFixed(2)}%
+                  </div>
+                )}
+                <div className="mt-1.5"><Spark values={histValues} /></div>
+              </>
+            ) : (
+              <div className="text-xs text-zinc-600 mt-1 leading-snug">
+                Tracking starts this month — check back next month for your change.
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -250,6 +378,73 @@ export default function NetWorth() {
                 ? <span className="text-emerald-400 font-semibold">🎉 Goal reached! +{fmt$(netWorth - goal, false)} over target</span>
                 : <span className="text-zinc-500">{fmt$(goal - netWorth, false)} remaining</span>
               }
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Allocation donut + breakdown ───────────────────────────────────── */}
+      {totalAssets > 0 && (() => {
+        const slices = SECTIONS
+          .filter(s => s.key !== 'liabilities')
+          .map(({ key, label }) => ({
+            key, label,
+            value: key === 'investments' ? investmentTotal : sub(key).value,
+            color: SECTION_COLORS[key] ?? '#71717a',
+          }))
+          .filter(s => s.value > 0);
+        return (
+          <div className="card">
+            <div className="text-xs font-bold text-zinc-300 uppercase tracking-widest mb-1">Asset Allocation</div>
+            <div className="text-xs text-zinc-600 mb-3">By asset class</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+              {/* Donut */}
+              <div className="h-52">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={slices}
+                      dataKey="value"
+                      nameKey="label"
+                      innerRadius="55%"
+                      outerRadius="85%"
+                      paddingAngle={2}
+                      stroke="none"
+                    >
+                      {slices.map(s => <Cell key={s.key} fill={s.color} />)}
+                    </Pie>
+                    <Tooltip
+                      formatter={(v: number) => fmt$(v, false)}
+                      contentStyle={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 12 }}
+                      itemStyle={{ color: '#e4e4e7' }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+              {/* Legend / breakdown bars */}
+              <div className="space-y-2.5">
+                {slices.map(({ key, label, value, color }) => {
+                  const pct = totalAssets > 0 ? (value / totalAssets) * 100 : 0;
+                  return (
+                    <div key={key} className="flex items-center gap-3 text-xs">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />
+                      <span className="text-zinc-300 w-28 flex-shrink-0 font-medium">{label}</span>
+                      <div className="flex-1 bg-zinc-800 rounded-full h-2">
+                        <div className="h-2 rounded-full" style={{ width: `${pct}%`, background: color }} />
+                      </div>
+                      <span className="text-zinc-200 tabular-nums w-24 text-right font-medium">{fmt$(value, false)}</span>
+                      <span className="text-zinc-500 tabular-nums w-11 text-right">{pct.toFixed(1)}%</span>
+                    </div>
+                  );
+                })}
+                <div className="pt-2 mt-1 border-t border-zinc-800 flex items-center gap-3 text-xs">
+                  <span className="w-2.5 h-2.5 shrink-0" />
+                  <span className="text-zinc-200 font-bold w-28 flex-shrink-0">Total Assets</span>
+                  <div className="flex-1" />
+                  <span className="text-zinc-100 tabular-nums w-24 text-right font-bold">{fmt$(totalAssets, false)}</span>
+                  <span className="text-zinc-600 tabular-nums w-11 text-right">100%</span>
+                </div>
+              </div>
             </div>
           </div>
         );
@@ -515,24 +710,6 @@ export default function NetWorth() {
           })()}
         </div>
 
-        {/* Asset breakdown bar */}
-        <div className="mt-4 space-y-2">
-          {SECTIONS.filter(s => s.key !== 'liabilities').map(({ key, label }) => {
-            const v = key === 'investments' ? investmentTotal : sub(key).value;
-            const pct = totalAssets > 0 ? (v / totalAssets) * 100 : 0;
-            if (v === 0) return null;
-            return (
-              <div key={key} className="flex items-center gap-3 text-xs">
-                <span className="text-zinc-400 w-28 flex-shrink-0">{label}</span>
-                <div className="flex-1 bg-zinc-800 rounded-full h-2">
-                  <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${pct}%` }} />
-                </div>
-                <span className="text-zinc-300 tabular-nums w-24 text-right">{fmt$(v, false)}</span>
-                <span className="text-zinc-600 w-10 text-right">{pct.toFixed(1)}%</span>
-              </div>
-            );
-          })}
-        </div>
       </div>
     </div>
   );
