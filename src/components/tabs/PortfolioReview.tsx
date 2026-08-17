@@ -13,7 +13,7 @@ const MANUAL_PRICES_KEY = 'swing_manual_prices';
 const LIVE_PRICES_KEY   = 'swing_live_prices';
 const EARNINGS_CACHE_KEY = 'swing_earnings_dates';
 
-type Rating = 'STRONG HOLD' | 'HOLD' | 'TRIM' | 'WATCH' | 'EXIT';
+type Rating = 'CORE' | 'STRONG HOLD' | 'HOLD' | 'TRIM' | 'WATCH' | 'EXIT';
 
 function baseTickerKey(t: string) {
   return t.replace(/\.(TO|V|TSX)$/i, '').toUpperCase();
@@ -237,8 +237,8 @@ function analyzeCompany(members: RawRow[], groupAllocationPct: number): CompanyA
   let rating: Rating;
   let action: string;
   if (isEtf) {
-    // Broad funds are buy-and-hold by design — never TRIM/EXIT on stock rules
-    rating = score >= 7.5 ? 'STRONG HOLD' : 'HOLD';
+    // Broad funds are buy-and-hold by design — they get their own CORE rating
+    rating = 'CORE';
     action = totalPnLPct < -15
       ? 'Broad market is down — stay the course and keep contributing unless your timeline has changed. Drawdowns are normal for index funds.'
       : 'Core diversified holding — keep contributing on schedule. No action needed.';
@@ -255,6 +255,7 @@ function analyzeCompany(members: RawRow[], groupAllocationPct: number): CompanyA
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function ratingColor(r: Rating) {
+  if (r === 'CORE')        return 'text-violet-400 border-violet-500/40 bg-violet-500/10';
   if (r === 'STRONG HOLD') return 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10';
   if (r === 'HOLD')        return 'text-blue-400 border-blue-500/40 bg-blue-500/10';
   if (r === 'TRIM')        return 'text-amber-400 border-amber-500/40 bg-amber-500/10';
@@ -262,6 +263,7 @@ function ratingColor(r: Rating) {
   return 'text-red-400 border-red-500/40 bg-red-500/10';
 }
 function ratingBorder(r: Rating) {
+  if (r === 'CORE')        return 'border-l-violet-500';
   if (r === 'STRONG HOLD') return 'border-l-emerald-500';
   if (r === 'HOLD')        return 'border-l-blue-500';
   if (r === 'TRIM')        return 'border-l-amber-500';
@@ -269,6 +271,7 @@ function ratingBorder(r: Rating) {
   return 'border-l-red-500';
 }
 function ratingIcon(r: Rating) {
+  if (r === 'CORE')        return <Shield size={14} className="text-violet-400" />;
   if (r === 'STRONG HOLD') return <CheckCircle size={14} className="text-emerald-400" />;
   if (r === 'HOLD')        return <Shield size={14} className="text-blue-400" />;
   if (r === 'TRIM')        return <Minus size={14} className="text-amber-400" />;
@@ -570,7 +573,7 @@ export default function PortfolioReview() {
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
               <div className="text-xs text-zinc-500 mb-2">Rating Breakdown</div>
               <div className="space-y-1">
-                {(['STRONG HOLD', 'HOLD', 'TRIM', 'WATCH', 'EXIT'] as Rating[]).map(r => {
+                {(['CORE', 'STRONG HOLD', 'HOLD', 'TRIM', 'WATCH', 'EXIT'] as Rating[]).map(r => {
                   const count = new Set(
                     result.cards.filter(c => c.analysis.rating === r).map(c => baseTickerKey(c.ticker))
                   ).size;
