@@ -102,6 +102,27 @@ export async function fetchConstituentQuotes(force = false): Promise<Map<string,
   } catch { return new Map(); }
 }
 
+// ── batched constituent close history (spark endpoint) ───────────────────────
+// One request for all ~165 constituents' daily closes (~1y). This powers real
+// breadth (20/50/200DMA, 5D/20D positive) and the drill-down when the v7
+// quote endpoint is unavailable.
+
+export async function fetchConstituentHistories(force = false): Promise<Map<string, number[]>> {
+  const key = 'swing_sec_con_hist';
+  if (force) localStorage.removeItem(key);
+  const cached = cacheGet<Array<{ symbol: string; closes: number[] }>>(key, SECTOR_CACHE.constituentHistory);
+  if (cached) return new Map(cached.map(s => [s.symbol, s.closes]));
+  try {
+    const all = SECTOR_ETFS.flatMap(s => s.constituents);
+    const res = await fetch(`/api/yahoo?spark=1&tickers=${encodeURIComponent(all.join(','))}`);
+    if (!res.ok) return new Map();
+    const j = await res.json();
+    const series: Array<{ symbol: string; closes: number[] }> = j.series ?? [];
+    if (series.length > 0) cacheSet(key, series);
+    return new Map(series.map(s => [s.symbol, s.closes]));
+  } catch { return new Map(); }
+}
+
 // ── SPY header quote (fresher than history cache) ────────────────────────────
 
 export interface SpyQuote { price: number; changePct: number }

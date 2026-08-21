@@ -2,10 +2,12 @@
 // Sector Rotation — scoring engine. Pure calculations, no fetching, no UI.
 //
 // Rotation Pressure (−100…+100): direction current evidence suggests rotation
-//   is moving. Cross-sectional z-scores of momentum/RS-change/volume/trend
-//   components, weight-summed (weights in sectorConfig).
+//   is moving. Cross-sectional z-scores of momentum/RS-change/breadth/volume/
+//   trend components, weight-summed (weights in sectorConfig). Components with
+//   no data are DROPPED and remaining weights renormalized — missing data is
+//   never treated as zero/bearish.
 // Rotation Score (0–100): overall sector strength via cross-sectional
-//   percentiles of level metrics.
+//   percentiles of level metrics (same renormalization rule).
 // Neither metric represents literal dollar fund flows.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -13,6 +15,7 @@ import {
   SECTOR_ETFS, BENCHMARK_ETF, ROTATION_PRESSURE_WEIGHTS, ROTATION_SCORE_WEIGHTS,
   ROTATION_THRESHOLDS, MOMENTUM_THRESHOLDS, PRESSURE_TREND_THRESHOLDS,
   SIGNAL_THRESHOLDS, BREADTH_SETTINGS, MATRIX_TRAIL, TIMEFRAME_DAYS,
+  PARTICIPATION_WEIGHTS, OPPORTUNITY_THRESHOLDS,
 } from '../../config/sectorConfig';
 import type { SectorDef, MatrixTimeframe, Timeframe } from '../../config/sectorConfig';
 import type { EtfHistory, ConstituentQuote } from './sectorData';
@@ -23,11 +26,15 @@ export type TrendArrow     = 'up' | 'flat' | 'down';
 
 export interface BreadthInfo {
   score: number;
-  above50Pct: number;
-  above200Pct: number;
-  positiveTodayPct: number;
+  above20Pct: number | null;
+  above50Pct: number | null;
+  above200Pct: number | null;
+  pos5DPct: number | null;
+  pos20DPct: number | null;
+  positiveTodayPct: number | null;
   count: number;
-  change: number | null; // vs snapshot ≥3 trading days ago (built up over app usage)
+  change: number | null; // score now vs ~5 trading days ago (real history)
+  source: 'history' | 'quotes';
 }
 
 export interface SignalInfo {
@@ -44,7 +51,7 @@ export interface SectorMetrics {
   name: string;
   price: number;
   ret: Partial<Record<Timeframe, number | null>>;
-  rs: Partial<Record<'5D' | '1M' | '3M' | '6M', number | null>>; // decimals
+  rs: Partial<Record<'5D' | '1M' | '3M' | '6M', number | null>>;
   rsChange1M: number | null;
   accelShort: number | null;
   accelMedium: number | null;
@@ -54,7 +61,7 @@ export interface SectorMetrics {
   above200: boolean | null;
   breadth: BreadthInfo | null;
   pressure: number;
-  pressureSeries: number[]; // oldest → newest, ~40 points
+  pressureSeries: number[];
   pressureDelta: { d1: number | null; d5: number | null; d20: number | null };
   trendArrow: TrendArrow;
   score: number;
@@ -65,11 +72,15 @@ export interface SectorMetrics {
 
 export interface MarketRegime {
   regime: 'Risk-On' | 'Risk-Off' | 'Mixed';
+  reason: string;
   leader: string | null;
   fastestImproving: string | null;
   weakeningLeader: string | null;
+  weakeningLeaderDetail: string | null;
   lagging: string | null;
-  breadthPct: number | null; // % of sectors with positive 1M RS
+  breadthPct: number | null;
+  positiveCount: number;
+  totalCount: number;
 }
 
 export interface Opportunity {
@@ -79,8 +90,33 @@ export interface Opportunity {
   name: string;
   score: number;
   pressure: number;
+  pressureDelta5: number | null;
+  breadth: number | null;
+  breadthChange: number | null;
+  momentum: MomentumState;
   reasons: string[];
   participants: string[];
+}
+
+export interface ConstituentRow {
+  symbol: string;
+  name: string;
+  price: number | null;
+  marketCap: number | null;
+  ret1D: number | null;     // decimals
+  ret5D: number | null;
+  ret1M: number | null;
+  ret3M: number | null;
+  rsVsSector1M: number | null;
+  rsVsSpy1M: number | null;
+  volRatio: number | null;
+  above20: boolean | null;
+  above50: boolean | null;
+  above200: boolean | null;
+  forwardPE: number | null;
+  epsTTM: number | null;
+  earningsTs: number | null;
+  participation: number | null; // 0–100
 }
 
 // ── small math helpers ───────────────────────────────────────────────────────
@@ -110,56 +146,100 @@ function zScores(xs: (number | null)[]): number[] {
   return xs.map(x => (x == null || !isFinite(x)) ? 0 : Math.max(-2.5, Math.min(2.5, (x - mu) / sd)));
 }
 
-function percentiles(xs: (number | null)[]): number[] {
+function percentiles(xs: (number | null)[]): (number | null)[] {
   const idx = xs.map((x, i) => ({ x, i })).filter(p => p.x != null && isFinite(p.x as number));
   const sorted = [...idx].sort((a, b) => (a.x as number) - (b.x as number));
-  const out = xs.map(() => 50);
+  const out: (number | null)[] = xs.map(() => null);
   sorted.forEach((p, rank) => { out[p.i] = sorted.length > 1 ? (rank / (sorted.length - 1)) * 100 : 50; });
   return out;
 }
 
-// ── breadth (from batched constituent quotes) ────────────────────────────────
+/** Quadrant label matching the on-screen matrix layout. */
+export function quadrantOf(x: number, y: number): Classification | 'Lagging' {
+  if (y >= 0) return x >= 0 ? 'Leading' : 'Improving';
+  return x >= 0 ? 'Weakening' : 'Lagging';
+}
 
-const BREADTH_HIST_KEY = 'swing_sec_breadth_hist';
+// ── breadth from constituent close history ───────────────────────────────────
 
-function computeBreadth(def: SectorDef, quotes: Map<string, ConstituentQuote>): Omit<BreadthInfo, 'change'> | null {
-  const qs = def.constituents.map(t => quotes.get(t)).filter((q): q is ConstituentQuote => !!q && q.price != null);
-  if (qs.length < 4) return null;
-  const above50  = qs.filter(q => q.ma50 != null  && q.price! > q.ma50!).length / qs.length;
-  const above200 = qs.filter(q => q.ma200 != null && q.price! > q.ma200!).length / qs.length;
-  const posToday = qs.filter(q => (q.changePct ?? 0) > 0).length / qs.length;
-  const w = BREADTH_SETTINGS.weights;
-  const score = (above50 * w.above50 + above200 * w.above200 + posToday * w.positiveToday) * 100;
+interface BreadthComponents {
+  above20: number | null;
+  above50: number | null;
+  above200: number | null;
+  pos5D: number | null;
+  pos20D: number | null;
+}
+
+function breadthComponentsAt(
+  def: SectorDef,
+  closesMap: Map<string, number[]>,
+  offset: number,
+): { comps: BreadthComponents; count: number } | null {
+  const lists = def.constituents.map(t => closesMap.get(t)).filter((c): c is number[] => !!c && c.length > offset + 25);
+  if (lists.length < BREADTH_SETTINGS.minConstituents) return null;
+
+  const frac = (test: (c: number[]) => boolean | null): number | null => {
+    let yes = 0, n = 0;
+    for (const c of lists) {
+      const r = test(c);
+      if (r == null) continue;
+      n++;
+      if (r) yes++;
+    }
+    return n >= BREADTH_SETTINGS.minConstituents ? yes / n : null;
+  };
+
+  const px = (c: number[]) => c[c.length - 1 - offset];
   return {
-    score: Math.round(score),
-    above50Pct: Math.round(above50 * 100),
-    above200Pct: Math.round(above200 * 100),
-    positiveTodayPct: Math.round(posToday * 100),
-    count: qs.length,
+    count: lists.length,
+    comps: {
+      above20:  frac(c => { const m = sma(c, 20, offset);  return m == null ? null : px(c) > m; }),
+      above50:  frac(c => { const m = sma(c, 50, offset);  return m == null ? null : px(c) > m; }),
+      above200: frac(c => { const m = sma(c, 200, offset); return m == null ? null : px(c) > m; }),
+      pos5D:    frac(c => { const r = retN(c, 5, offset);  return r == null ? null : r > 0; }),
+      pos20D:   frac(c => { const r = retN(c, 20, offset); return r == null ? null : r > 0; }),
+    },
   };
 }
 
-/** Persist today's breadth snapshot; return change vs a snapshot ≥3 days old. */
-function breadthChangeTracker(scores: Record<string, number>): Record<string, number | null> {
-  let hist: Record<string, Record<string, number>> = {};
-  try { hist = JSON.parse(localStorage.getItem(BREADTH_HIST_KEY) ?? '{}'); } catch { /* fresh */ }
-  const today = new Date().toISOString().split('T')[0];
-  hist[today] = scores;
-  // keep last 15 snapshots
-  const dates = Object.keys(hist).sort();
-  while (dates.length > 15) { delete hist[dates.shift()!]; }
-  try { localStorage.setItem(BREADTH_HIST_KEY, JSON.stringify(hist)); } catch { /* full */ }
-
-  const cutoff = new Date(Date.now() - 3 * 86400000).toISOString().split('T')[0];
-  const refDate = Object.keys(hist).sort().filter(d => d <= cutoff).pop();
-  const out: Record<string, number | null> = {};
-  for (const etf of Object.keys(scores)) {
-    out[etf] = refDate != null && hist[refDate]?.[etf] != null ? scores[etf] - hist[refDate][etf] : null;
+function breadthScoreFrom(comps: BreadthComponents): number | null {
+  const W = BREADTH_SETTINGS.weights;
+  const parts: Array<[number | null, number]> = [
+    [comps.above20, W.above20], [comps.above50, W.above50], [comps.above200, W.above200],
+    [comps.pos5D, W.pos5D], [comps.pos20D, W.pos20D],
+  ];
+  let sum = 0, wSum = 0;
+  for (const [v, w] of parts) {
+    if (v == null) continue; // renormalize — missing component never counts as 0
+    sum += v * w;
+    wSum += w;
   }
-  return out;
+  if (wSum === 0) return null;
+  return Math.round((sum / wSum) * 100);
 }
 
-// ── pressure component extraction (price/volume-derived, historical-capable) ─
+/** Fallback breadth from current batch quotes only (no history available). */
+function breadthFromQuotes(def: SectorDef, quotes: Map<string, ConstituentQuote>): BreadthInfo | null {
+  const qs = def.constituents.map(t => quotes.get(t)).filter((q): q is ConstituentQuote => !!q && q.price != null);
+  if (qs.length < BREADTH_SETTINGS.minConstituents) return null;
+  const above50  = qs.filter(q => q.ma50 != null  && q.price! > q.ma50!).length / qs.length;
+  const above200 = qs.filter(q => q.ma200 != null && q.price! > q.ma200!).length / qs.length;
+  const posToday = qs.filter(q => (q.changePct ?? 0) > 0).length / qs.length;
+  const w = BREADTH_SETTINGS.quoteFallbackWeights;
+  return {
+    score: Math.round((above50 * w.above50 + above200 * w.above200 + posToday * w.positiveToday) * 100),
+    above20Pct: null,
+    above50Pct: Math.round(above50 * 100),
+    above200Pct: Math.round(above200 * 100),
+    pos5DPct: null, pos20DPct: null,
+    positiveTodayPct: Math.round(posToday * 100),
+    count: qs.length,
+    change: null,
+    source: 'quotes',
+  };
+}
+
+// ── pressure components ──────────────────────────────────────────────────────
 
 interface PressureComponents {
   rsChange1M: number | null;
@@ -170,9 +250,11 @@ interface PressureComponents {
   mediumMomentum: number | null;
   volumeConfirm: number | null;
   trend: number | null;
+  breadthLevel: number | null;
+  breadthChange: number | null;
 }
 
-function componentsAt(sec: number[], vol: number[], spy: number[], endOffset: number): PressureComponents {
+function componentsAt(sec: number[], vol: number[], spy: number[], endOffset: number): Omit<PressureComponents, 'breadthLevel' | 'breadthChange'> {
   const rsRatioAt = (off: number): number | null => {
     const i = sec.length - 1 - off;
     const j = spy.length - 1 - off;
@@ -188,7 +270,6 @@ function componentsAt(sec: number[], vol: number[], spy: number[], endOffset: nu
   const m20p  = retN(sec, 20, endOffset + 20);
   const m21   = retN(sec, 21, endOffset);
 
-  // volume: avg last 5 vs avg previous 20
   let volumeConfirm: number | null = null;
   const vEnd = vol.length - endOffset;
   if (vEnd - 25 >= 0) {
@@ -197,7 +278,6 @@ function componentsAt(sec: number[], vol: number[], spy: number[], endOffset: nu
     if (v20 > 0) volumeConfirm = v5 / v20 - 1;
   }
 
-  // trend composite: above 50DMA + above 200DMA + 50DMA>200DMA (0…3 → −1…+1)
   let trend: number | null = null;
   const px = sec[sec.length - 1 - endOffset];
   const ma50  = sma(sec, 50, endOffset);
@@ -207,7 +287,7 @@ function componentsAt(sec: number[], vol: number[], spy: number[], endOffset: nu
     if (ma200 != null) {
       t += px > ma200 ? 1 : 0;
       t += ma50 > ma200 ? 1 : 0;
-      trend = t / 1.5 - 1; // 0…3 → −1…+1
+      trend = t / 1.5 - 1;
     } else {
       trend = t * 2 - 1;
     }
@@ -225,30 +305,23 @@ function componentsAt(sec: number[], vol: number[], spy: number[], endOffset: nu
   };
 }
 
-function pressureFromComponents(
-  all: PressureComponents[],
-  breadthZ: number[] | null,
-  breadthChangeZ: number[] | null,
-): number[] {
+/**
+ * Cross-sectional pressure for one day. Components where fewer than 2 sectors
+ * report data are dropped entirely and the weight pool renormalized.
+ */
+function pressuresForDay(all: PressureComponents[]): number[] {
   const W = ROTATION_PRESSURE_WEIGHTS;
-  const priceKeys: (keyof PressureComponents)[] = [
-    'rsChange1M', 'rsChange5D', 'accelShort', 'accelMedium',
-    'shortMomentum', 'mediumMomentum', 'volumeConfirm', 'trend',
-  ];
-  const z: Record<string, number[]> = {};
-  for (const k of priceKeys) z[k] = zScores(all.map(c => c[k]));
-
-  let totalW = priceKeys.reduce((s, k) => s + W[k as keyof typeof W], 0);
-  if (breadthZ) totalW += W.breadthLevel;
-  if (breadthChangeZ) totalW += W.breadthChange;
-
+  const keys = Object.keys(W) as (keyof PressureComponents)[];
+  const active: Array<{ z: number[]; w: number }> = [];
+  for (const k of keys) {
+    const vals = all.map(c => c[k]);
+    if (vals.filter(v => v != null && isFinite(v)).length < 2) continue; // drop, renormalize
+    active.push({ z: zScores(vals), w: W[k as keyof typeof W] });
+  }
+  const totalW = active.reduce((s, a) => s + a.w, 0) || 1;
   return all.map((_, i) => {
-    let sum = 0;
-    for (const k of priceKeys) sum += z[k][i] * W[k as keyof typeof W];
-    if (breadthZ)       sum += breadthZ[i] * W.breadthLevel;
-    if (breadthChangeZ) sum += breadthChangeZ[i] * W.breadthChange;
-    const raw = (sum / totalW) * 40; // z∈±2.5 → ±100
-    return Math.round(Math.max(-100, Math.min(100, raw)));
+    const sum = active.reduce((s, a) => s + a.z[i] * a.w, 0);
+    return Math.round(Math.max(-100, Math.min(100, (sum / totalW) * 40)));
   });
 }
 
@@ -259,6 +332,7 @@ const PRESSURE_HISTORY_DAYS = 40;
 export function computeSectorMetrics(
   histories: Map<string, EtfHistory>,
   constituentQuotes: Map<string, ConstituentQuote>,
+  constituentCloses: Map<string, number[]> = new Map(),
 ): SectorMetrics[] {
   const spyH = histories.get(BENCHMARK_ETF);
   if (!spyH) return [];
@@ -266,31 +340,61 @@ export function computeSectorMetrics(
 
   const available = SECTOR_ETFS.filter(s => histories.has(s.etf));
 
-  // Breadth (current only) + change tracker
-  const breadthRaw = new Map(available.map(s => [s.etf, computeBreadth(s, constituentQuotes)]));
-  const breadthScores: Record<string, number> = {};
-  breadthRaw.forEach((b, etf) => { if (b) breadthScores[etf] = b.score; });
-  const breadthChanges = breadthChangeTracker(breadthScores);
+  // Breadth score series per sector (from real constituent history when we
+  // have it). breadthSeries[etf][k] = score at offset (PRESSURE_HISTORY_DAYS − k).
+  const lookback = BREADTH_SETTINGS.changeLookbackDays;
+  const breadthSeries = new Map<string, (number | null)[]>();
+  const breadthCurrent = new Map<string, BreadthInfo | null>();
+  for (const s of available) {
+    const series: (number | null)[] = [];
+    for (let off = PRESSURE_HISTORY_DAYS; off >= 0; off--) {
+      const b = breadthComponentsAt(s, constituentCloses, off);
+      series.push(b ? breadthScoreFrom(b.comps) : null);
+    }
+    breadthSeries.set(s.etf, series);
 
-  // Pressure series: components at each historical offset, cross-sectional per day
+    const nowB = breadthComponentsAt(s, constituentCloses, 0);
+    if (nowB) {
+      const score = breadthScoreFrom(nowB.comps);
+      const prev = series.length > lookback ? series[series.length - 1 - lookback] : null;
+      breadthCurrent.set(s.etf, score == null ? null : {
+        score,
+        above20Pct:  nowB.comps.above20  != null ? Math.round(nowB.comps.above20 * 100)  : null,
+        above50Pct:  nowB.comps.above50  != null ? Math.round(nowB.comps.above50 * 100)  : null,
+        above200Pct: nowB.comps.above200 != null ? Math.round(nowB.comps.above200 * 100) : null,
+        pos5DPct:    nowB.comps.pos5D    != null ? Math.round(nowB.comps.pos5D * 100)    : null,
+        pos20DPct:   nowB.comps.pos20D   != null ? Math.round(nowB.comps.pos20D * 100)   : null,
+        positiveTodayPct: null,
+        count: nowB.count,
+        change: prev != null && score != null ? score - prev : null,
+        source: 'history',
+      });
+    } else {
+      breadthCurrent.set(s.etf, breadthFromQuotes(s, constituentQuotes));
+    }
+  }
+
+  // Pressure series with breadth level/change as historical components
   const seriesByEtf = new Map<string, number[]>(available.map(s => [s.etf, []]));
   for (let off = PRESSURE_HISTORY_DAYS; off >= 0; off--) {
-    const comps = available.map(s => {
+    const k = PRESSURE_HISTORY_DAYS - off;
+    const comps: PressureComponents[] = available.map(s => {
       const h = histories.get(s.etf)!;
-      return componentsAt(h.closes, h.volumes, spy, off);
+      const base = componentsAt(h.closes, h.volumes, spy, off);
+      const bs = breadthSeries.get(s.etf)!;
+      const bNow  = bs[k] ?? null;
+      const bPrev = k - lookback >= 0 ? bs[k - lookback] : null;
+      return {
+        ...base,
+        breadthLevel:  bNow != null ? bNow - 50 : null,
+        breadthChange: bNow != null && bPrev != null ? bNow - bPrev : null,
+      };
     });
-    const isCurrent = off === 0;
-    const bZ  = isCurrent && Object.keys(breadthScores).length >= 4
-      ? zScores(available.map(s => breadthScores[s.etf] != null ? breadthScores[s.etf] - 50 : null))
-      : null;
-    const bcZ = isCurrent && Object.values(breadthChanges).some(v => v != null)
-      ? zScores(available.map(s => breadthChanges[s.etf] ?? null))
-      : null;
-    const dayPressures = pressureFromComponents(comps, bZ, bcZ);
+    const dayPressures = pressuresForDay(comps);
     available.forEach((s, i) => seriesByEtf.get(s.etf)!.push(dayPressures[i]));
   }
 
-  // Rotation Score inputs (cross-sectional percentiles)
+  // Rotation Score inputs (cross-sectional percentiles, renormalized)
   const cur = available.map(s => {
     const h = histories.get(s.etf)!;
     return { s, h, c: componentsAt(h.closes, h.volumes, spy, 0) };
@@ -341,18 +445,21 @@ export function computeSectorMetrics(
       : (pressureDelta.d5 ?? 0) < PRESSURE_TREND_THRESHOLDS.down ? 'down'
       : 'flat';
 
-    const bRaw = breadthRaw.get(s.etf) ?? null;
-    const breadth: BreadthInfo | null = bRaw
-      ? { ...bRaw, change: breadthChanges[s.etf] ?? null }
-      : null;
+    const breadth = breadthCurrent.get(s.etf) ?? null;
 
-    // Rotation Score
-    const totalSW = SW.mom5D + SW.mom1M + SW.mom3M + SW.rsVsSpy + SW.volume + SW.acceleration + SW.breadth;
-    const breadthPart = breadth ? breadth.score : 50;
-    const score = Math.round(
-      (p5[i] * SW.mom5D + p1m[i] * SW.mom1M + p3m[i] * SW.mom3M + pRs[i] * SW.rsVsSpy
-       + pVol[i] * SW.volume + pAcc[i] * SW.acceleration + breadthPart * SW.breadth) / totalSW
-    );
+    // Rotation Score — drop unavailable parts and renormalize
+    const parts: Array<[number | null, number]> = [
+      [p5[i], SW.mom5D], [p1m[i], SW.mom1M], [p3m[i], SW.mom3M], [pRs[i], SW.rsVsSpy],
+      [pVol[i], SW.volume], [pAcc[i], SW.acceleration],
+      [breadth ? breadth.score : null, SW.breadth],
+    ];
+    let scoreSum = 0, scoreW = 0;
+    for (const [v, w] of parts) {
+      if (v == null) continue;
+      scoreSum += v * w;
+      scoreW += w;
+    }
+    const score = scoreW > 0 ? Math.round(scoreSum / scoreW) : 50;
 
     const T = ROTATION_THRESHOLDS;
     const classification: Classification =
@@ -368,7 +475,6 @@ export function computeSectorMetrics(
     const above50  = ma50  != null ? px > ma50  : null;
     const above200 = ma200 != null ? px > ma200 : null;
 
-    // Matrix coordinates + trails
     const matrix = {} as SectorMetrics['matrix'];
     (['1M', '3M', '6M'] as MatrixTimeframe[]).forEach(tf => {
       const days = TIMEFRAME_DAYS[tf];
@@ -426,14 +532,20 @@ function deriveSignal(m: SectorMetrics): SignalInfo | null {
   const reasons: string[] = [];
   const rsImproving = (m.rsChange1M ?? 0) > 0;
   const accel = m.momentum === 'ACCELERATING';
-  const breadthUp = m.breadth?.change != null && m.breadth.change > 0;
   const shortBeatsMedium = (m.ret['5D'] ?? 0) / 5 > (m.ret['1M'] ?? 0) / 21;
 
   const addCommon = () => {
     if (m.rsChange1M != null) reasons.push(`Relative strength vs SPY ${rsImproving ? 'improving' : 'deteriorating'} (${pct(m.rsChange1M)} over 1M)`);
     reasons.push(`5D momentum ${m.momentum.toLowerCase()} (5D ${pct(m.ret['5D'])}, 1M ${pct(m.ret['1M'])})`);
     if (m.breadth) {
-      reasons.push(`Top-holdings breadth ${m.breadth.score}${m.breadth.change != null ? ` (${m.breadth.change >= 0 ? '+' : ''}${m.breadth.change} vs last snapshot)` : ''} · ${m.breadth.above50Pct}% above 50DMA`);
+      const b = m.breadth;
+      if (b.change != null) {
+        reasons.push(`Breadth ${b.change >= 0 ? 'increased' : 'decreased'} ${b.score - b.change} → ${b.score}`);
+      } else {
+        reasons.push(`Breadth ${b.score}`);
+      }
+      if (b.above20Pct != null) reasons.push(`${b.above20Pct}% of tracked stocks above 20DMA`);
+      else if (b.above50Pct != null) reasons.push(`${b.above50Pct}% of tracked stocks above 50DMA`);
     }
     if (m.volumeRatio != null) reasons.push(`Volume ${m.volumeRatio.toFixed(2)}x vs 20-day average`);
   };
@@ -462,7 +574,6 @@ function deriveSignal(m: SectorMetrics): SignalInfo | null {
     addCommon();
     return { label: 'HOLDING LEADERSHIP', direction: 'hold', reasons };
   }
-  void breadthUp;
   return null;
 }
 
@@ -474,24 +585,50 @@ export function computeRegime(metrics: SectorMetrics[]): MarketRegime | null {
   const def = metrics.filter(m => !m.def.cyclical);
   const cycAvg = mean(cyc.map(m => m.pressure));
   const defAvg = mean(def.map(m => m.pressure));
-  const spread = cycAvg - defAvg;
-  const regime: MarketRegime['regime'] = spread > 12 ? 'Risk-On' : spread < -12 ? 'Risk-Off' : 'Mixed';
-
-  const byScore    = [...metrics].sort((a, b) => b.score - a.score);
-  const byDelta5   = [...metrics].sort((a, b) => (b.pressureDelta.d5 ?? -999) - (a.pressureDelta.d5 ?? -999));
-  const weakLeaders = metrics
-    .filter(m => m.score >= ROTATION_THRESHOLDS.improving && m.pressure < 0)
-    .sort((a, b) => a.pressure - b.pressure);
-
+  const spread = Math.round(cycAvg - defAvg);
+  const posCount = metrics.filter(m => m.pressure > 0).length;
+  const total = metrics.length;
   const rsPositive = metrics.filter(m => (m.rs['1M'] ?? 0) > 0).length;
+  const breadthPct = Math.round((rsPositive / total) * 100);
+
+  // Deterministic rules
+  let regime: MarketRegime['regime'];
+  if (spread > 10 && posCount >= Math.ceil(total * 0.55)) regime = 'Risk-On';
+  else if (spread < -10 && posCount <= Math.floor(total * 0.45)) regime = 'Risk-Off';
+  else regime = 'Mixed';
+
+  const reasonParts = [
+    `${posCount}/${total} sectors positive pressure`,
+    `${breadthPct}% outperforming SPY (1M)`,
+    spread > 5 ? `cyclicals leading defensives (+${spread})`
+      : spread < -5 ? `defensives leading cyclicals (${spread})`
+      : `cyclicals ≈ defensives (${spread >= 0 ? '+' : ''}${spread})`,
+  ];
+
+  const byScore  = [...metrics].sort((a, b) => b.score - a.score);
+  const byDelta5 = [...metrics].sort((a, b) => (b.pressureDelta.d5 ?? -999) - (a.pressureDelta.d5 ?? -999));
+
+  // Weakening Leader: still relatively strong (score) but pressure negative
+  // or falling fast — a leader losing its bid.
+  const weakLeaders = metrics
+    .filter(m => m.score >= ROTATION_THRESHOLDS.improving
+      && (m.pressure < -15 || (m.pressureDelta.d5 ?? 0) < -20))
+    .sort((a, b) => (a.pressure + (a.pressureDelta.d5 ?? 0)) - (b.pressure + (b.pressureDelta.d5 ?? 0)));
+  const wl = weakLeaders[0] ?? null;
 
   return {
     regime,
+    reason: reasonParts.join(' · '),
     leader: byScore[0]?.name ?? null,
     fastestImproving: byDelta5[0]?.name ?? null,
-    weakeningLeader: weakLeaders[0]?.name ?? null,
+    weakeningLeader: wl?.name ?? null,
+    weakeningLeaderDetail: wl
+      ? `Score ${wl.score}, pressure ${wl.pressure >= 0 ? '+' : ''}${wl.pressure}${wl.pressureDelta.d5 != null ? `, Δ5D ${wl.pressureDelta.d5 >= 0 ? '+' : ''}${wl.pressureDelta.d5}` : ''}`
+      : null,
     lagging: byScore[byScore.length - 1]?.name ?? null,
-    breadthPct: Math.round((rsPositive / metrics.length) * 100),
+    breadthPct,
+    positiveCount: posCount,
+    totalCount: total,
   };
 }
 
@@ -500,36 +637,145 @@ export function computeRegime(metrics: SectorMetrics[]): MarketRegime | null {
 export function computeOpportunities(
   metrics: SectorMetrics[],
   quotes: Map<string, ConstituentQuote>,
+  constituentCloses: Map<string, number[]> = new Map(),
 ): Opportunity[] {
-  const out: Opportunity[] = [];
+  const O = OPPORTUNITY_THRESHOLDS;
 
-  const participants = (m: SectorMetrics): string[] =>
-    m.def.constituents
-      .map(t => quotes.get(t))
-      .filter((q): q is ConstituentQuote =>
-        !!q && q.price != null && q.ma50 != null && q.price > q.ma50 && (q.changePct ?? 0) > 0)
-      .sort((a, b) => (b.changePct ?? 0) - (a.changePct ?? 0))
+  const participants = (m: SectorMetrics): string[] => {
+    // Prefer quote data; fall back to close-history-derived participation
+    const rows = m.def.constituents.map(t => {
+      const q = quotes.get(t);
+      const closes = constituentCloses.get(t);
+      const ret1M = closes ? retN(closes, 21) : null;
+      const above50 = q?.price != null && q.ma50 != null ? q.price > q.ma50
+        : closes ? (() => { const ma = sma(closes, 50); return ma != null ? closes[closes.length - 1] > ma : null; })()
+        : null;
+      const chg = q?.changePct != null ? q.changePct / 100 : (closes ? retN(closes, 1) : null);
+      return { t, ret1M, above50, chg };
+    });
+    return rows
+      .filter(r => r.above50 === true && ((r.ret1M ?? 0) > 0 || (r.chg ?? 0) > 0))
+      .sort((a, b) => (b.ret1M ?? b.chg ?? 0) - (a.ret1M ?? a.chg ?? 0))
       .slice(0, 3)
-      .map(q => q.symbol);
+      .map(r => r.t);
+  };
 
+  // One card per sector — pick the highest-priority category that applies
+  const cards: Opportunity[] = [];
   for (const m of metrics) {
+    const base = {
+      etf: m.etf, name: m.name, score: m.score, pressure: m.pressure,
+      pressureDelta5: m.pressureDelta.d5,
+      breadth: m.breadth?.score ?? null,
+      breadthChange: m.breadth?.change ?? null,
+      momentum: m.momentum,
+    };
     const sig = m.signal;
+    let card: Opportunity | null = null;
+
     if (sig?.label === 'EARLY ROTATION') {
-      out.push({ category: 'EARLY ROTATION', direction: 'in', etf: m.etf, name: m.name, score: m.score, pressure: m.pressure, reasons: sig.reasons, participants: participants(m) });
-    } else if (m.score >= ROTATION_THRESHOLDS.leading && m.momentum === 'ACCELERATING') {
-      out.push({ category: 'ACCELERATING LEADER', direction: 'in', etf: m.etf, name: m.name, score: m.score, pressure: m.pressure, reasons: sig?.reasons ?? [], participants: participants(m) });
-    } else if (m.score >= ROTATION_THRESHOLDS.leading && m.pressure >= 0) {
-      out.push({ category: 'STRONG LEADER', direction: 'in', etf: m.etf, name: m.name, score: m.score, pressure: m.pressure, reasons: sig?.reasons ?? [], participants: participants(m) });
-    } else if (m.score >= 75 && (m.ret['5D'] ?? 0) < -0.015 && m.above50 === true) {
-      out.push({ category: 'PULLBACK IN LEADING SECTOR', direction: 'in', etf: m.etf, name: m.name, score: m.score, pressure: m.pressure, reasons: [`5D ${pct(m.ret['5D'])} pullback while still above 50DMA with score ${m.score}`], participants: participants(m) });
+      card = { ...base, category: 'EARLY ROTATION', direction: 'in', reasons: sig.reasons, participants: participants(m) };
+    } else if (m.score >= O.acceleratingLeaderScore && m.momentum === 'ACCELERATING') {
+      card = { ...base, category: 'ACCELERATING LEADER', direction: 'in', reasons: sig?.reasons ?? [`Score ${m.score} with accelerating momentum`], participants: participants(m) };
+    } else if (m.breadth?.change != null && m.breadth.change >= O.improvingBreadthChange && m.pressure > 0) {
+      card = { ...base, category: 'IMPROVING BREADTH', direction: 'in', reasons: [`Breadth expanded ${m.breadth.score - m.breadth.change} → ${m.breadth.score} — participation spreading`, ...(sig?.reasons.slice(0, 2) ?? [])], participants: participants(m) };
+    } else if (m.score >= O.strongLeaderScore && m.pressure >= 0) {
+      card = { ...base, category: 'STRONG LEADER', direction: 'in', reasons: sig?.reasons ?? [`Score ${m.score} with positive pressure`], participants: participants(m) };
+    } else if (m.score >= O.pullbackScore && (m.ret['5D'] ?? 0) < O.pullback5D && m.above50 === true) {
+      card = { ...base, category: 'PULLBACK IN LEADER', direction: 'in', reasons: [`5D ${pct(m.ret['5D'])} pullback while still above 50DMA with score ${m.score}`], participants: participants(m) };
     } else if (sig?.label === 'LEADERSHIP WEAKENING') {
-      out.push({ category: 'LEADERSHIP DETERIORATING', direction: 'out', etf: m.etf, name: m.name, score: m.score, pressure: m.pressure, reasons: sig.reasons, participants: [] });
+      card = { ...base, category: 'LEADERSHIP DETERIORATING', direction: 'out', reasons: sig.reasons, participants: [] };
     } else if (sig?.label === 'STRONG ROTATION OUT') {
-      out.push({ category: 'ROTATION OUT', direction: 'out', etf: m.etf, name: m.name, score: m.score, pressure: m.pressure, reasons: sig.reasons, participants: [] });
+      card = { ...base, category: 'STRONG ROTATION OUT', direction: 'out', reasons: sig.reasons, participants: [] };
+    } else if (m.pressure <= O.rotationOutPressure) {
+      card = { ...base, category: 'ROTATION OUT', direction: 'out', reasons: sig?.reasons ?? [`Pressure ${m.pressure} with ${m.momentum.toLowerCase()} momentum`], participants: [] };
     }
+
+    if (card) cards.push(card);
   }
 
-  return out
-    .sort((a, b) => Math.abs(b.pressure) - Math.abs(a.pressure))
-    .slice(0, 10);
+  return cards
+    .sort((a, b) => Math.abs(b.pressure) + Math.abs(b.pressureDelta5 ?? 0) - (Math.abs(a.pressure) + Math.abs(a.pressureDelta5 ?? 0)))
+    .slice(0, O.maxCards);
+}
+
+// ── constituent rows for drill-down ──────────────────────────────────────────
+
+export function computeConstituentRows(
+  def: SectorDef,
+  sectorCloses: number[] | null,
+  spyCloses: number[] | null,
+  quotes: Map<string, ConstituentQuote>,
+  constituentCloses: Map<string, number[]>,
+): ConstituentRow[] {
+  const secRet1M = sectorCloses ? retN(sectorCloses, 21) : null;
+  const spyRet1M = spyCloses ? retN(spyCloses, 21) : null;
+
+  const rows = def.constituents.map((t): ConstituentRow | null => {
+    const q = quotes.get(t) ?? null;
+    const closes = constituentCloses.get(t) ?? null;
+    if (!q && !closes) return null;
+
+    const price = q?.price ?? (closes ? closes[closes.length - 1] : null);
+    const ret1D = q?.changePct != null ? q.changePct / 100 : (closes ? retN(closes, 1) : null);
+    const ret5D = closes ? retN(closes, 5) : null;
+    const ret1M = closes ? retN(closes, 21) : null;
+    const ret3M = closes ? retN(closes, 63) : null;
+
+    const maStatus = (n: 20 | 50 | 200): boolean | null => {
+      if (closes) {
+        const m = sma(closes, n);
+        return m != null ? closes[closes.length - 1] > m : null;
+      }
+      if (q?.price != null) {
+        if (n === 50 && q.ma50 != null) return q.price > q.ma50;
+        if (n === 200 && q.ma200 != null) return q.price > q.ma200;
+      }
+      return null;
+    };
+
+    return {
+      symbol: t,
+      name: q?.name ?? t,
+      price,
+      marketCap: q?.marketCap ?? null,
+      ret1D, ret5D, ret1M, ret3M,
+      rsVsSector1M: ret1M != null && secRet1M != null ? ret1M - secRet1M : null,
+      rsVsSpy1M:    ret1M != null && spyRet1M != null ? ret1M - spyRet1M : null,
+      volRatio: q?.volume != null && q?.avgVolume3M ? q.volume / q.avgVolume3M : null,
+      above20: maStatus(20), above50: maStatus(50), above200: maStatus(200),
+      forwardPE: q?.forwardPE ?? null,
+      epsTTM: q?.epsTTM ?? null,
+      earningsTs: q?.earningsTs ?? null,
+      participation: null,
+    };
+  }).filter((r): r is ConstituentRow => r != null);
+
+  // Participation Score — cross-sectional percentiles within the sector,
+  // missing components dropped and weights renormalized per stock
+  const PW = PARTICIPATION_WEIGHTS;
+  const pRsSec = percentiles(rows.map(r => r.rsVsSector1M));
+  const pR1M   = percentiles(rows.map(r => r.ret1M));
+  const pR5D   = percentiles(rows.map(r => r.ret5D));
+  const pVolR  = percentiles(rows.map(r => r.volRatio));
+
+  rows.forEach((r, i) => {
+    const parts: Array<[number | null, number]> = [
+      [pRsSec[i], PW.rsVsSector1M],
+      [pR1M[i],   PW.ret1M],
+      [pR5D[i],   PW.ret5D],
+      [pVolR[i],  PW.volumeRatio],
+      [r.above50 == null ? null : (r.above50 ? 100 : 0), PW.above50],
+      [r.above200 == null ? null : (r.above200 ? 100 : 0), PW.above200],
+    ];
+    let sum = 0, w = 0;
+    for (const [v, wt] of parts) {
+      if (v == null) continue;
+      sum += v * wt;
+      w += wt;
+    }
+    r.participation = w > 0 ? Math.round(sum / w) : null;
+  });
+
+  return rows;
 }

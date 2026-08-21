@@ -253,6 +253,43 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
+  // ── Spark mode: /api/yahoo?spark=1&tickers=AAPL,MSFT,… ──────────────────────
+  // Batched ~1y daily closes for many symbols via the v8 spark endpoint
+  // (no crumb required, unlike v7 quotes). Used by Sector Rotation breadth.
+  if (req.query.spark === '1' && typeof req.query.tickers === 'string') {
+    try {
+      const syms = req.query.tickers.toUpperCase().split(',').map(s => s.trim()).filter(Boolean).slice(0, 200);
+      const r = await fetch(
+        `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(syms.join(','))}&range=1y&interval=1d`,
+        { headers: { 'User-Agent': UA, Accept: 'application/json' } }
+      );
+      if (!r.ok) return res.status(200).json({ series: [] });
+      const j: any = await r.json();
+      const series: Array<{ symbol: string; closes: number[] }> = [];
+      const push = (symbol: string, closesRaw: (number | null)[] | undefined) => {
+        if (!Array.isArray(closesRaw)) return;
+        const closes = closesRaw
+          .filter((c): c is number => c != null && typeof c === 'number')
+          .slice(-240)
+          .map(c => Math.round(c * 100) / 100);
+        if (closes.length >= 30) series.push({ symbol, closes });
+      };
+      const results = j?.spark?.result;
+      if (Array.isArray(results)) {
+        for (const row of results) {
+          push(row?.symbol, row?.response?.[0]?.indicators?.quote?.[0]?.close);
+        }
+      } else if (j && typeof j === 'object') {
+        // legacy shape: { "AAPL": { close: [...] }, ... }
+        for (const [sym, v] of Object.entries<any>(j)) push(sym, v?.close);
+      }
+      res.setHeader('Cache-Control', 's-maxage=900, stale-while-revalidate=3600');
+      return res.status(200).json({ series });
+    } catch {
+      return res.status(200).json({ series: [] });
+    }
+  }
+
   // ── Batch quote mode: /api/yahoo?tickers=AAPL,MSFT,… ────────────────────────
   // One v7 request for many symbols. Used by Sector Rotation for breadth.
   const { tickers } = req.query;
