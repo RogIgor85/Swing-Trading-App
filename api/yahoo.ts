@@ -253,11 +253,91 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
+  // ── Batch quote mode: /api/yahoo?tickers=AAPL,MSFT,… ────────────────────────
+  // One v7 request for many symbols. Used by Sector Rotation for breadth.
+  const { tickers } = req.query;
+  if (tickers && typeof tickers === 'string') {
+    try {
+      const syms = tickers.toUpperCase().split(',').map(s => s.trim()).filter(Boolean).slice(0, 150);
+      const fields = [
+        'regularMarketPrice','regularMarketChangePercent','regularMarketVolume',
+        'fiftyDayAverage','twoHundredDayAverage','averageDailyVolume3Month',
+        'marketCap','trailingPE','forwardPE','epsTrailingTwelveMonths',
+        'longName','shortName','earningsTimestamp',
+      ].join(',');
+      const r = await fetch(
+        `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(syms.join(','))}&fields=${fields}`,
+        { headers: { 'User-Agent': UA, Accept: 'application/json' } }
+      );
+      if (!r.ok) return res.status(200).json({ quotes: [] });
+      const j: any = await r.json();
+      const quotes = (j?.quoteResponse?.result ?? []).map((q: any) => ({
+        symbol:      q.symbol,
+        name:        q.longName ?? q.shortName ?? q.symbol,
+        price:       q.regularMarketPrice        ?? null,
+        changePct:   q.regularMarketChangePercent ?? null, // percent units
+        volume:      q.regularMarketVolume        ?? null,
+        avgVolume3M: q.averageDailyVolume3Month   ?? null,
+        ma50:        q.fiftyDayAverage            ?? null,
+        ma200:       q.twoHundredDayAverage       ?? null,
+        marketCap:   q.marketCap                  ?? null,
+        trailingPE:  q.trailingPE                 ?? null,
+        forwardPE:   q.forwardPE                  ?? null,
+        epsTTM:      q.epsTrailingTwelveMonths    ?? null,
+        earningsTs:  q.earningsTimestamp          ?? null,
+      }));
+      res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=300');
+      return res.status(200).json({ quotes });
+    } catch {
+      return res.status(200).json({ quotes: [] });
+    }
+  }
+
   const { ticker } = req.query;
   if (!ticker || typeof ticker !== 'string') {
     return res.status(400).json({ error: 'ticker required' });
   }
   const t = ticker.toUpperCase();
+
+  // ── History mode: /api/yahoo?ticker=XLK&history=1 ───────────────────────────
+  // Raw daily timestamps/closes/volumes for ~1y. Used by Sector Rotation.
+  if (req.query.history === '1') {
+    try {
+      const r = await fetch(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}?interval=1d&range=1y&includePrePost=false`,
+        { headers: { 'User-Agent': UA, Accept: 'application/json' } }
+      );
+      if (!r.ok) return res.status(200).json({ error: 'unavailable' });
+      const j: any = await r.json();
+      const result = j?.chart?.result?.[0];
+      const meta   = result?.meta;
+      const ts: number[]              = result?.timestamp ?? [];
+      const q                          = result?.indicators?.quote?.[0] ?? {};
+      const closesRaw: (number|null)[] = q.close  ?? [];
+      const volsRaw:  (number|null)[]  = q.volume ?? [];
+      // Keep only rows with a valid close, aligned across all arrays
+      const timestamps: number[] = [];
+      const closes: number[] = [];
+      const volumes: number[] = [];
+      for (let i = 0; i < ts.length; i++) {
+        const c = closesRaw[i];
+        if (c == null || typeof c !== 'number') continue;
+        timestamps.push(ts[i]);
+        closes.push(c);
+        volumes.push(typeof volsRaw[i] === 'number' ? (volsRaw[i] as number) : 0);
+      }
+      res.setHeader('Cache-Control', 's-maxage=900, stale-while-revalidate=3600');
+      return res.status(200).json({
+        symbol: t,
+        name:   meta?.longName ?? meta?.shortName ?? t,
+        price:  meta?.regularMarketPrice ?? (closes.length ? closes[closes.length - 1] : null),
+        prevClose: meta?.previousClose ?? meta?.chartPreviousClose ?? null,
+        timestamps, closes, volumes,
+      });
+    } catch {
+      return res.status(200).json({ error: 'unavailable' });
+    }
+  }
 
   try {
     let result: any;

@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
-import { TrendingUp, Eye, ScanLine, PieChart, ClipboardList, Layers, LogOut, Wallet, Download, FileSearch, DatabaseBackup, Upload } from 'lucide-react';
+import { TrendingUp, Eye, ScanLine, PieChart, ClipboardList, Layers, LogOut, Wallet, Download, FileSearch, DatabaseBackup, Upload, ArrowLeftRight } from 'lucide-react';
 import { exportAllToExcel } from './lib/exportExcel';
 import { downloadBackup, restoreBackup } from './lib/backup';
 import TriFrameScorecard from './components/tabs/TriFrameScorecard';
 import WatchList from './components/tabs/WatchList';
 import ChartAnalysis from './components/tabs/ChartAnalysis';
+import SectorRotation from './components/tabs/SectorRotation';
 import PortfolioRisk from './components/tabs/PortfolioRisk';
 import PortfolioReview from './components/tabs/PortfolioReview';
 import TradeJournal from './components/tabs/TradeJournal';
@@ -18,6 +19,7 @@ const TABS = [
   { id: 'scorecard', label: 'Scorecard',    icon: Layers },
   { id: 'watchlist', label: 'Watch List',   icon: Eye },
   { id: 'technical', label: 'Chart Analysis', icon: ScanLine },
+  { id: 'sectors',   label: 'Sector Rotation', icon: ArrowLeftRight },
   { id: 'portfolio', label: 'Portfolio',       icon: PieChart },
   { id: 'review',   label: 'Portfolio Review', icon: FileSearch },
   { id: 'journal',  label: 'Trade Journal',    icon: ClipboardList },
@@ -177,10 +179,11 @@ export default function App() {
       </header>
 
       {/* Content — portfolio & sprint get wider containers to avoid table scroll */}
-      <main className={`mx-auto px-4 py-6 ${ ['portfolio', 'sprint'].includes(activeTab) ? 'max-w-[1600px]' : 'max-w-7xl'}`}>
+      <main className={`mx-auto px-4 py-6 ${ ['portfolio', 'sprint', 'sectors'].includes(activeTab) ? 'max-w-[1600px]' : 'max-w-7xl'}`}>
         {activeTab === 'scorecard' && <TriFrameScorecard />}
         {activeTab === 'watchlist' && <WatchList />}
         {activeTab === 'technical' && <ChartAnalysis />}
+        {activeTab === 'sectors'  && <SectorRotation />}
         {activeTab === 'portfolio' && <PortfolioRisk />}
         {activeTab === 'review'   && <PortfolioReview />}
         {activeTab === 'journal'  && <TradeJournal />}
