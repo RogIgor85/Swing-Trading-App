@@ -6,7 +6,8 @@ import {
 } from './portfolioEngine';
 import type { EnrichedHolding, PriceInfo } from './portfolioEngine';
 import { pearson, dailyReturns, computeCorrelationMatrix, averageCorrelation } from './correlation';
-import { DIVERSIFIED_LABEL, SPECIALTY_LABEL, UNCLASSIFIED_LABEL } from '../../config/portfolioConfig';
+import { validatePrevClose } from './portfolioData';
+import { DIVERSIFIED_LABEL, GROWTH_ETF_LABEL, UNCLASSIFIED_LABEL } from '../../config/portfolioConfig';
 import type { Holding, Account, Currency } from '../../types';
 import type { SectorMetrics } from '../sector/sectorEngine';
 import { SECTOR_ETFS } from '../../config/sectorConfig';
@@ -165,9 +166,9 @@ describe('portfolio totals', () => {
 // ── PRIORITY 2: classification ───────────────────────────────────────────────
 
 describe('position type and sector classification', () => {
-  it('recognizes broad ETFs, specialty ETFs and sector ETFs', () => {
+  it('recognizes broad, growth, sector ETFs and stocks', () => {
     expect(positionTypeOf('XEQT.TO')).toBe('Broad-Market ETF');
-    expect(positionTypeOf('QQC.TO')).toBe('Specialty ETF');
+    expect(positionTypeOf('QQC.TO')).toBe('Growth/Index ETF');
     expect(positionTypeOf('XLK')).toBe('Sector ETF');
     expect(positionTypeOf('MSFT')).toBe('Individual Stock');
   });
@@ -178,8 +179,10 @@ describe('position type and sector classification', () => {
     expect(c.sectorEtf).toBeNull();
   });
 
-  it('buckets a Nasdaq-100 ETF as specialty, not Technology', () => {
-    expect(classifyHolding(holding({ ticker: 'QQC.TO' }), null).sectorLabel).toBe(SPECIALTY_LABEL);
+  it('buckets a Nasdaq-100 ETF as growth, not Technology or broad-market', () => {
+    const c = classifyHolding(holding({ ticker: 'QQC.TO' }), null);
+    expect(c.sectorLabel).toBe(GROWTH_ETF_LABEL);
+    expect(c.sectorEtf).toBeNull();
   });
 
   it('maps a sector ETF to its own sector', () => {
@@ -194,10 +197,11 @@ describe('position type and sector classification', () => {
     expect(c.sectorIsManual).toBe(false);
   });
 
-  it('respects and flags a manual sector override', () => {
+  it('ignores a stale stored sector but surfaces it', () => {
     const c = classifyHolding(holding({ ticker: 'META', sector: 'Technology' }), 'XLC');
-    expect(c.sectorLabel).toBe('Technology');
-    expect(c.sectorIsManual).toBe(true);
+    expect(c.sectorLabel).toBe('Communication Services');
+    expect(c.sectorIsManual).toBe(false);
+    expect(c.staleStoredSector).toBe('Technology');
   });
 
   it('marks a stock as Unclassified rather than Other when nothing is known', () => {
@@ -436,6 +440,123 @@ describe('validation', () => {
     const alloc = computeAllocation(rows);
     const bad = { ...accountTotalsOf(rows), RRSP: 1 };
     expect(validateTotals(rows, totals, alloc, bad).length).toBeGreaterThan(0);
+  });
+});
+
+// ── regression: the year-old "previous close" bug ────────────────────────────
+
+describe('previous-close validation (regression)', () => {
+  it('rejects a previous close that implies a 1-year-sized daily move', () => {
+    // XEQT: price 35.10, a year-ago close of 29.00 → +21% "daily"
+    expect(validatePrevClose('XEQT.TO', 35.10, 29.00)).toBeNull();
+    // QQC: price 49.53, a year-ago close of 39.60 → +25% "daily"
+    expect(validatePrevClose('QQC.TO', 49.53, 39.60)).toBeNull();
+  });
+
+  it('accepts a realistic previous close', () => {
+    expect(validatePrevClose('XEQT.TO', 35.10, 34.98)).toBe(34.98);
+    expect(validatePrevClose('QQC.TO', 49.53, 49.19)).toBe(49.19);
+  });
+
+  it('rejects null and non-positive previous closes', () => {
+    expect(validatePrevClose('MSFT', 483, null)).toBeNull();
+    expect(validatePrevClose('MSFT', 483, 0)).toBeNull();
+    expect(validatePrevClose('MSFT', 483, -10)).toBeNull();
+  });
+
+  it('a rejected previous close yields N/A daily figures, never a fabricated one', () => {
+    const r = enrich(holding({ ticker: 'XEQT.TO', currency: 'CAD', shares: 3250, avg_cost: 30 }),
+      { price: 35.10, prevClose: validatePrevClose('XEQT.TO', 35.10, 29.00) });
+    expect(r.dailyPct).toBeNull();
+    expect(r.dailyPnlCAD).toBeNull();
+    expect(r.marketValueCAD).toBeCloseTo(3250 * 35.10, 4);   // valuation still correct
+  });
+
+  it('portfolio daily total excludes holdings with rejected previous closes', () => {
+    const rows = withAllocation([
+      enrich(holding({ id: 'a', ticker: 'MSFT', currency: 'USD', shares: 10, avg_cost: 400 }), { price: 500, prevClose: 495 }),
+      enrich(holding({ id: 'b', ticker: 'XEQT.TO', currency: 'CAD', shares: 3250, avg_cost: 30 }),
+        { price: 35.10, prevClose: validatePrevClose('XEQT.TO', 35.10, 29.00) }),
+    ]);
+    const t = computeTotals(rows);
+    expect(t.dailyCoverage).toEqual({ counted: 1, total: 2 });
+    expect(t.dailyPnlCAD).toBeCloseTo(10 * 5 * FX, 4);
+    expect(Math.abs(t.dailyPct!)).toBeLessThan(5);   // no 8%+ phantom move
+  });
+});
+
+// ── ETF type separation ──────────────────────────────────────────────────────
+
+describe('ETF type separation', () => {
+  function build(specs: Array<[string, number]>) {
+    const rows = withAllocation(specs.map(([ticker, value], i) =>
+      enrich(holding({ id: `h${i}`, ticker, currency: 'CAD', shares: value, avg_cost: 1 }),
+        { price: 1, prevClose: 1 }, { sectorEtf: ticker === 'MSFT' ? 'XLK' : null })));
+    return { rows, alloc: computeAllocation(rows) };
+  }
+
+  it('classifies QQC as a growth/index fund, not broad-market', () => {
+    expect(positionTypeOf('QQC.TO')).toBe('Growth/Index ETF');
+    expect(positionTypeOf('XEQT.TO')).toBe('Broad-Market ETF');
+    expect(classifyHolding(holding({ ticker: 'QQC.TO' }), null).sectorLabel).toBe(GROWTH_ETF_LABEL);
+  });
+
+  it('reports broad and growth ETF percentages separately', () => {
+    const { rows, alloc } = build([['XEQT.TO', 32], ['QQC.TO', 10], ['MSFT', 58]]);
+    const c = computeConcentration(rows, alloc);
+    expect(c.broadEtfPct).toBeCloseTo(32, 4);
+    expect(c.growthEtfPct).toBeCloseTo(10, 4);
+    expect(c.largestBroadEtf!.ticker).toBe('XEQT.TO');
+    expect(c.largestGrowthEtf!.ticker).toBe('QQC.TO');
+  });
+
+  it('gives a growth ETF less diversification credit than a broad ETF', () => {
+    const broad  = build([['XEQT.TO', 50], ['MSFT', 25], ['META', 25]]);
+    const growth = build([['QQC.TO', 50], ['MSFT', 25], ['META', 25]]);
+    const order = ['LOW', 'MODERATE', 'HIGH', 'VERY HIGH'];
+    const a = computeConcentration(broad.rows, broad.alloc);
+    const b = computeConcentration(growth.rows, growth.alloc);
+    expect(order.indexOf(a.level)).toBeLessThanOrEqual(order.indexOf(b.level));
+    expect(b.reasons.some(r => r.includes('partial credit'))).toBe(true);
+  });
+
+  it('still ranks a broad ETF far below an equivalent single-stock position', () => {
+    const etf   = build([['XEQT.TO', 60], ['MSFT', 10], ['META', 10], ['ORCL', 10], ['NFLX', 10]]);
+    const stock = build([['MSFT', 60], ['META', 10], ['ORCL', 10], ['NFLX', 10], ['TSLA', 10]]);
+    const order = ['LOW', 'MODERATE', 'HIGH', 'VERY HIGH'];
+    expect(order.indexOf(computeConcentration(etf.rows, etf.alloc).level))
+      .toBeLessThan(order.indexOf(computeConcentration(stock.rows, stock.alloc).level));
+  });
+});
+
+// ── sector authority ─────────────────────────────────────────────────────────
+
+describe('sector classification authority', () => {
+  it('provider classification beats a stale stored sector', () => {
+    const c = classifyHolding(holding({ ticker: 'TSLA', sector: 'Technology' }), 'XLY');
+    expect(c.sectorLabel).toBe('Consumer Discretionary');
+    expect(c.sectorEtf).toBe('XLY');
+    expect(c.sectorIsManual).toBe(false);
+    expect(c.staleStoredSector).toBe('Technology');   // surfaced, not used
+  });
+
+  it('routes NFLX to Communication Services despite a stored Technology value', () => {
+    const c = classifyHolding(holding({ ticker: 'NFLX', sector: 'Technology' }), 'XLC');
+    expect(c.sectorLabel).toBe('Communication Services');
+    expect(c.sectorEtf).toBe('XLC');
+  });
+
+  it('a deliberate pin overrides the provider and maps to that sector ETF', () => {
+    const c = classifyHolding(holding({ ticker: 'TSLA', sector: 'Technology' }), 'XLY', 'Technology');
+    expect(c.sectorLabel).toBe('Technology');
+    expect(c.sectorEtf).toBe('XLK');       // rotation follows the pinned sector
+    expect(c.sectorIsManual).toBe(true);
+  });
+
+  it('falls back to the stored value only when the provider has nothing', () => {
+    const c = classifyHolding(holding({ ticker: 'ZZZZ', sector: 'Industrials' }), null);
+    expect(c.sectorLabel).toBe('Industrials');
+    expect(c.staleStoredSector).toBeNull();
   });
 });
 

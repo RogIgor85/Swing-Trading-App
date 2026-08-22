@@ -33,8 +33,23 @@ async function tryChart(ticker: string): Promise<any> {
     const closes: number[] = (result?.indicators?.quote?.[0]?.close ?? [])
       .filter((c: any) => c != null && typeof c === 'number');
 
-    const prevClose = meta.previousClose ?? meta.chartPreviousClose ?? null;
-    const price     = meta.regularMarketPrice;
+    // Previous close = the PRIOR TRADING DAY's close.
+    // NEVER meta.chartPreviousClose — on a range=1y request that is the close
+    // from a year ago, which turns the daily change into the 1-year return.
+    const price = meta.regularMarketPrice;
+    let prevClose: number | null =
+      typeof meta.previousClose === 'number' && meta.previousClose > 0 ? meta.previousClose : null;
+    if (prevClose == null && closes.length >= 2) {
+      // Last close may be today's live bar; step back to the prior session
+      const last = closes[closes.length - 1];
+      prevClose = Math.abs(last - price) < 1e-9 ? closes[closes.length - 2] : last;
+    }
+    // Sanity: a >25% single-session move on an index/ETF almost always means a
+    // mismatched previous close. Report null rather than a bogus daily figure.
+    if (prevClose != null && prevClose > 0 && Math.abs(price / prevClose - 1) > 0.25) {
+      const alt = closes.length >= 2 ? closes[closes.length - 2] : null;
+      prevClose = alt != null && alt > 0 && Math.abs(price / alt - 1) <= 0.25 ? alt : null;
+    }
     const change    = prevClose != null ? price - prevClose : null;
     const changePct = prevClose != null && prevClose !== 0 ? (price - prevClose) / prevClose : null;
 
@@ -364,11 +379,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         volumes.push(typeof volsRaw[i] === 'number' ? (volsRaw[i] as number) : 0);
       }
       res.setHeader('Cache-Control', 's-maxage=900, stale-while-revalidate=3600');
+      const px = meta?.regularMarketPrice ?? (closes.length ? closes[closes.length - 1] : null);
+      // Prior trading-day close only — chartPreviousClose is a year old here
+      const prev = typeof meta?.previousClose === 'number' && meta.previousClose > 0
+        ? meta.previousClose
+        : closes.length >= 2 ? closes[closes.length - 2] : null;
       return res.status(200).json({
         symbol: t,
         name:   meta?.longName ?? meta?.shortName ?? t,
-        price:  meta?.regularMarketPrice ?? (closes.length ? closes[closes.length - 1] : null),
-        prevClose: meta?.previousClose ?? meta?.chartPreviousClose ?? null,
+        price:  px,
+        prevClose: prev,
         timestamps, closes, volumes,
       });
     } catch {

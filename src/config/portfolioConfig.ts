@@ -3,10 +3,17 @@
 // Position-type registry, sector labels, and all thresholds/weights.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type PositionType = 'Individual Stock' | 'Broad-Market ETF' | 'Sector ETF' | 'Specialty ETF' | 'Other';
+export type PositionType =
+  | 'Individual Stock'
+  | 'Broad-Market ETF'      // genuinely diversified across sectors & regions
+  | 'Growth/Index ETF'      // concentrated index (e.g. Nasdaq-100) — partial credit only
+  | 'Sector ETF'
+  | 'Specialty ETF'
+  | 'Other';
 
 /** Allocation bucket label used when an ETF has no single sector. */
 export const DIVERSIFIED_LABEL = 'Diversified ETF';
+export const GROWTH_ETF_LABEL  = 'Growth / Nasdaq ETF';
 export const SPECIALTY_LABEL   = 'Specialty ETF';
 export const UNCLASSIFIED_LABEL = 'Unclassified';
 
@@ -50,13 +57,19 @@ export const ETF_REGISTRY: Record<string, EtfDef> = {
   'XBB.TO': { type: 'Broad-Market ETF', label: DIVERSIFIED_LABEL, note: 'Aggregate bonds' },
   'BND':    { type: 'Broad-Market ETF', label: DIVERSIFIED_LABEL, note: 'Aggregate bonds' },
   'AGG':    { type: 'Broad-Market ETF', label: DIVERSIFIED_LABEL, note: 'Aggregate bonds' },
-  // Nasdaq-100 — tech-heavy but multi-sector, so specialty rather than sector
-  'QQC.TO': { type: 'Specialty ETF', label: SPECIALTY_LABEL, note: 'Nasdaq-100 (CAD hedged)' },
-  'QQC-F.TO': { type: 'Specialty ETF', label: SPECIALTY_LABEL, note: 'Nasdaq-100 (CAD)' },
-  'ZNQ.TO': { type: 'Specialty ETF', label: SPECIALTY_LABEL, note: 'Nasdaq-100' },
-  'HXQ.TO': { type: 'Specialty ETF', label: SPECIALTY_LABEL, note: 'Nasdaq-100' },
-  'QQQ':    { type: 'Specialty ETF', label: SPECIALTY_LABEL, note: 'Nasdaq-100' },
-  'QQQM':   { type: 'Specialty ETF', label: SPECIALTY_LABEL, note: 'Nasdaq-100' },
+  // Nasdaq-100 / growth — NOT broadly diversified. Heavily concentrated in
+  // large-cap tech, so these overlap directly with individual tech holdings
+  // and receive materially less diversification credit than a broad fund.
+  'QQC.TO':   { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'Nasdaq-100 (CAD hedged)' },
+  'QQC-F.TO': { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'Nasdaq-100 (CAD)' },
+  'ZNQ.TO':   { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'Nasdaq-100' },
+  'HXQ.TO':   { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'Nasdaq-100' },
+  'QQQ':      { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'Nasdaq-100' },
+  'QQQM':     { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'Nasdaq-100' },
+  'XQQ.TO':   { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'Nasdaq-100 (CAD hedged)' },
+  'VGT':      { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'US tech sector' },
+  'SCHG':     { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'US large-cap growth' },
+  'VUG':      { type: 'Growth/Index ETF', label: GROWTH_ETF_LABEL, note: 'US large-cap growth' },
   // Single-sector SPDRs — these DO map to a sector
   'XLK':  { type: 'Sector ETF', label: 'Technology',             sectorEtf: 'XLK' },
   'XLF':  { type: 'Sector ETF', label: 'Financials',             sectorEtf: 'XLF' },
@@ -97,6 +110,9 @@ export const CONCENTRATION_THRESHOLDS = {
   // Broad ETFs are diversified by construction — much looser
   broadEtfHigh: 60,
   minHoldingsForLow: 8,
+  // Growth/Nasdaq funds are concentrated in large-cap tech and overlap with
+  // direct holdings, so they earn only partial diversification credit.
+  growthEtfConcentrated: 25,
 };
 
 export const TARGET_THRESHOLDS = {

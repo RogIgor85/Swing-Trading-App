@@ -4,14 +4,15 @@ import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recha
 import { storage, newId, nowIso } from '../../lib/storage';
 import { fetchYahoo } from '../../lib/yahoo';
 import { getUsdCad, getUsdCadCached } from '../../lib/fx';
-import { fetchQuote, fetchPortfolioHistories } from '../../lib/portfolio/portfolioData';
+import { fetchQuote, fetchPortfolioHistories, purgeStaleCaches } from '../../lib/portfolio/portfolioData';
+import { loadSectorOverrides, setSectorOverride, clearSectorOverride } from '../../lib/portfolio/sectorOverrides';
 import {
   enrichHolding, withAllocation, computeTotals, computeAllocation,
   computeConcentration, computeRotationExposure, validateTotals, accountTotalsOf,
 } from '../../lib/portfolio/portfolioEngine';
 import type { EnrichedHolding } from '../../lib/portfolio/portfolioEngine';
 import { computeCorrelationMatrix, averageCorrelation } from '../../lib/portfolio/correlation';
-import { CORRELATION_SETTINGS, ROTATION_EXPOSURE_HELP, HOLDING_STATUS_STYLE, UNCLASSIFIED_LABEL } from '../../config/portfolioConfig';
+import { CORRELATION_SETTINGS, ROTATION_EXPOSURE_HELP, HOLDING_STATUS_STYLE, UNCLASSIFIED_LABEL, SECTOR_NAME_BY_ETF } from '../../config/portfolioConfig';
 import { resolveSectors } from '../../lib/watch/watchSectorContext';
 import { fetchAllHistories, fetchConstituentQuotes, fetchConstituentHistories } from '../../lib/sector/sectorData';
 import { computeSectorMetrics } from '../../lib/sector/sectorEngine';
@@ -155,6 +156,12 @@ export default function PortfolioRisk() {
   const [detectedSectors, setDetectedSectors] = useState<Record<string, string | null>>({});
   const [corrDays, setCorrDays]               = useState<number>(CORRELATION_SETTINGS.defaultDays);
   const [ctxLoading, setCtxLoading]           = useState(false);
+  const [sectorOverrides, setSectorOverrides] = useState<Record<string, string>>(loadSectorOverrides);
+  const [showSectorAudit, setShowSectorAudit] = useState(false);
+
+  // Drop caches written while the price proxy was returning a year-old
+  // "previous close" — otherwise the bad daily figures survive the fix.
+  useEffect(() => { purgeStaleCaches(); }, []);
   const [editingRate, setEditingRate] = useState(false);
   const [rateInput, setRateInput] = useState('');
   const rateInputRef = useRef<HTMLInputElement>(null);
@@ -464,14 +471,20 @@ export default function PortfolioRisk() {
           ? { price: livePrice, prevClose: lp?.prevClose && lp.prevClose > 0 ? lp.prevClose : null }
           : null;
       const sectorEtf = detectedSectors[h.ticker.toUpperCase()] ?? null;
+      const override = sectorOverrides[h.ticker.toUpperCase()] ?? null;
+      // Rotation always follows the CURRENT sector mapping — never stored on the holding
+      const effectiveEtf = override
+        ? Object.entries(SECTOR_NAME_BY_ETF).find(([, n]) => n === override)?.[0] ?? sectorEtf
+        : sectorEtf;
       return enrichHolding({
         h, price, fxUsdCad: usdCadRate,
         detectedSectorEtf: sectorEtf,
-        sector: sectorEtf ? sectorMetricsMap.get(sectorEtf) ?? null : null,
+        sectorOverride: override,
+        sector: effectiveEtf ? sectorMetricsMap.get(effectiveEtf) ?? null : null,
         closes: closesByTicker.get(h.ticker.toUpperCase()),
       });
     })
-  ), [holdings, livePrices, manualPrices, usdCadRate, detectedSectors, sectorMetricsMap, closesByTicker]);
+  ), [holdings, livePrices, manualPrices, usdCadRate, detectedSectors, sectorMetricsMap, closesByTicker, sectorOverrides]);
 
   const engineByTicker = useMemo(
     () => new Map(engineRows.map(r => [r.ticker, r])), [engineRows]);
@@ -777,7 +790,14 @@ export default function PortfolioRisk() {
               </div>
             </div>
             <div className={`card py-3 ${!hasDailyData ? '' : dailyChangeCAD >= 0 ? 'border-emerald-900' : 'border-red-900'}`}>
-              <div className="text-xs text-zinc-500 mb-1">Today's Change</div>
+              <div className="text-xs text-zinc-500 mb-1 flex items-center gap-1">
+                Today's Change
+                <span className="text-zinc-600 cursor-help" title={
+                  "Today's Change\n\nCalculated from each holding's latest market price versus its previous trading-day close. " +
+                  "USD holdings are converted to CAD for the portfolio total.\n\n" +
+                  "Average cost and book value are never used. Holdings without a reliable previous close are excluded and shown as N/A."
+                }>ⓘ</span>
+              </div>
               {hasDailyData ? (
                 <>
                   <div className={`text-xl font-bold ${dailyChangeCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -836,8 +856,17 @@ export default function PortfolioRisk() {
                 </span>
               )}
               <span className="text-zinc-500">
-                Diversified ETFs <span className="text-zinc-200 font-medium">{fmt(concentration.broadEtfPct, 1)}%</span>
+                Broad-Market ETF <span className="text-zinc-200 font-medium">{fmt(concentration.broadEtfPct, 1)}%</span>
               </span>
+              {concentration.growthEtfPct > 0 && (
+                <span className="text-zinc-500" title="Nasdaq-100 / large-cap growth funds — concentrated, so only partial diversification credit">
+                  Growth / Nasdaq ETF <span className="text-zinc-200 font-medium">{fmt(concentration.growthEtfPct, 1)}%</span>
+                </span>
+              )}
+              <button onClick={() => setShowSectorAudit(v => !v)}
+                className="text-zinc-500 hover:text-zinc-300 underline underline-offset-2 decoration-dotted">
+                Sector audit
+              </button>
               <span className="ml-auto flex items-center gap-3 text-zinc-600">
                 {pricesUpdatedAt && <span>Prices {pricesUpdatedAt.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' })}</span>}
                 {fxUpdatedAt && <span>FX {fxUpdatedAt.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' })}</span>}
@@ -849,6 +878,64 @@ export default function PortfolioRisk() {
                 {diagnostics.map((d, i) => (
                   <div key={i}>⚠ {d.label}: expected {fmtCAD(d.expected)}, got {fmtCAD(d.actual)} (diff {fmtCAD(d.diff)})</div>
                 ))}
+              </div>
+            )}
+
+            {/* Sector audit — review before changing anything */}
+            {showSectorAudit && (
+              <div className="mt-3 pt-3 border-t border-zinc-800">
+                <div className="text-xs text-zinc-400 mb-2">
+                  Provider classification is used automatically. Pin a sector only if you disagree with it.
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-zinc-500 border-b border-zinc-800">
+                        <th className="th text-left">Ticker</th>
+                        <th className="th text-left">In use</th>
+                        <th className="th text-left">Provider</th>
+                        <th className="th text-left">Saved on holding</th>
+                        <th className="th text-left">Source</th>
+                        <th className="th" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/60">
+                      {engineRows.map((e) => {
+                        const providerEtf = detectedSectors[e.ticker.toUpperCase()] ?? null;
+                        const providerName = providerEtf ? SECTOR_NAME_BY_ETF[providerEtf] ?? providerEtf : null;
+                        const pinned = sectorOverrides[e.ticker.toUpperCase()];
+                        return (
+                          <tr key={e.ticker} className="tr-hover">
+                            <td className="td font-mono text-blue-400">{e.ticker}</td>
+                            <td className="td text-zinc-200">{e.sectorLabel}</td>
+                            <td className="td text-zinc-400">{e.isEtf ? <span className="text-zinc-600">n/a (fund)</span> : providerName ?? <span className="text-zinc-600">unavailable</span>}</td>
+                            <td className={`td ${e.staleStoredSector ? 'text-amber-500' : 'text-zinc-600'}`}>{e.h.sector || '—'}</td>
+                            <td className="td text-zinc-500">
+                              {e.isEtf ? 'fund registry' : pinned ? 'pinned by you' : providerName ? 'provider' : 'saved value'}
+                            </td>
+                            <td className="td text-right whitespace-nowrap">
+                              {!e.isEtf && providerName && (
+                                pinned ? (
+                                  <button onClick={() => setSectorOverrides(clearSectorOverride(e.ticker))}
+                                    className="text-xs text-blue-400 hover:text-blue-300">Use provider</button>
+                                ) : (
+                                  <select
+                                    className="select-base text-xs w-40"
+                                    value=""
+                                    onChange={(ev) => { if (ev.target.value) setSectorOverrides(setSectorOverride(e.ticker, ev.target.value)); }}
+                                  >
+                                    <option value="">Pin sector…</option>
+                                    {Object.values(SECTOR_NAME_BY_ETF).map((n) => <option key={n} value={n}>{n}</option>)}
+                                  </select>
+                                )
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
           </div>
@@ -1037,7 +1124,15 @@ export default function PortfolioRisk() {
                                 ) : (
                                   <span className={e.sectorLabel === UNCLASSIFIED_LABEL ? 'text-zinc-600' : 'text-zinc-400'}>{e.sectorLabel}</span>
                                 )}
-                                {e.sectorIsManual && <span className="text-[9px] text-amber-500 font-bold" title="Manual sector override">M</span>}
+                                {e.sectorIsManual && (
+                                  <button
+                                    onClick={() => setSectorOverrides(clearSectorOverride(h.ticker))}
+                                    className="text-[9px] text-amber-500 font-bold hover:text-white hover:bg-amber-600 px-0.5 rounded"
+                                    title="Manual sector override — click to use the provider's sector">M×</button>
+                                )}
+                                {e.staleStoredSector && (
+                                  <span className="text-[9px] text-zinc-600" title={`Saved as "${e.staleStoredSector}" — now using the provider's classification`}>⟲</span>
+                                )}
                               </div>
                               {sm ? (
                                 <div title={describePressure(sm.pressure, sm.pressureDelta.d5)}
@@ -1188,11 +1283,13 @@ export default function PortfolioRisk() {
                   {[
                     { label: 'Largest position', value: concentration.largestPosition ? `${concentration.largestPosition.ticker} ${fmt(concentration.largestPosition.pct, 1)}%` : 'N/A' },
                     { label: 'Largest individual stock', value: concentration.largestStock ? `${concentration.largestStock.ticker} ${fmt(concentration.largestStock.pct, 1)}%` : 'N/A' },
-                    { label: 'Largest ETF', value: concentration.largestEtf ? `${concentration.largestEtf.ticker} ${fmt(concentration.largestEtf.pct, 1)}%` : 'N/A' },
+                    { label: 'Largest broad-market ETF', value: concentration.largestBroadEtf ? `${concentration.largestBroadEtf.ticker} ${fmt(concentration.largestBroadEtf.pct, 1)}%` : 'N/A' },
+                    { label: 'Largest growth/Nasdaq ETF', value: concentration.largestGrowthEtf ? `${concentration.largestGrowthEtf.ticker} ${fmt(concentration.largestGrowthEtf.pct, 1)}%` : 'N/A' },
                     { label: 'Top 3 individual stocks', value: concentration.top3StocksPct != null ? `${fmt(concentration.top3StocksPct, 1)}%` : 'N/A' },
                     { label: 'Top 5 holdings', value: concentration.top5Pct != null ? `${fmt(concentration.top5Pct, 1)}%` : 'N/A' },
                     { label: 'Largest sector', value: concentration.largestSector ? `${concentration.largestSector.label} ${fmt(concentration.largestSector.pct, 1)}%` : 'N/A' },
-                    { label: 'Broad-market ETFs', value: `${fmt(concentration.broadEtfPct, 1)}%` },
+                    { label: 'Broad-market ETF %', value: `${fmt(concentration.broadEtfPct, 1)}%` },
+                    { label: 'Growth / Nasdaq ETF %', value: `${fmt(concentration.growthEtfPct, 1)}%` },
                     { label: 'Concentration Risk', value: concentrationRisk, colored: true },
                     { label: 'Holdings shown', value: `${filtered.length}` },
                   ].map(({ label, value, colored }) => (
@@ -1213,7 +1310,10 @@ export default function PortfolioRisk() {
                   <div className="mt-2 pt-2 border-t border-zinc-800 text-xs text-zinc-500 space-y-0.5">
                     <div className="text-zinc-600">Why {concentrationRisk}:</div>
                     {concentration.reasons.map((r, i) => <div key={i}>• {r}</div>)}
-                    <div className="text-zinc-600 pt-1">Broad-market ETFs are diversified by construction and are weighted less heavily than single stocks.</div>
+                    <div className="text-zinc-600 pt-1">
+                      Broad-market funds count as genuine diversification. Growth / Nasdaq funds get partial credit only —
+                      they concentrate in large-cap tech and overlap with individual holdings.
+                    </div>
                   </div>
                 )}
                 <div className="mt-3 space-y-1">

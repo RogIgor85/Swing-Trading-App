@@ -10,6 +10,7 @@
 
 import { finnhub } from '../finnhub';
 import { fetchYahoo } from '../yahoo';
+import { ETF_REGISTRY } from '../../config/portfolioConfig';
 
 export interface Quote {
   price: number;
@@ -18,6 +19,36 @@ export interface Quote {
 }
 
 const SUFFIXED = /\.(TO|V|TSX|CN|NEO|VN|L|AX|HK)$/i;
+
+// Bumped whenever a data bug invalidates cached values. v2 clears caches
+// written while the proxy was returning a year-old "previous close".
+const CACHE_VERSION = '2';
+const VERSION_KEY = 'swing_cache_version';
+
+/** One-time purge of caches poisoned by a previous data bug. */
+export function purgeStaleCaches(): void {
+  try {
+    if (localStorage.getItem(VERSION_KEY) === CACHE_VERSION) return;
+    [
+      'swing_live_prices', 'swing_daily_change', 'swing_portfolio_hist',
+      'swing_watch_hist', 'swing_sec_con_hist', 'swing_sec_constituents',
+      'swing_sec_spyquote',
+    ].forEach(k => localStorage.removeItem(k));
+    Object.keys(localStorage)
+      .filter(k => k.startsWith('swing_sec_hist_'))
+      .forEach(k => localStorage.removeItem(k));
+    localStorage.setItem(VERSION_KEY, CACHE_VERSION);
+  } catch { /* private mode */ }
+}
+
+/**
+ * Implied daily moves beyond these bounds indicate a mismatched previous close.
+ * Diversified funds essentially never move double digits in a session, so they
+ * get a tight bound; individual stocks can genuinely gap on earnings, so theirs
+ * is far looser to avoid discarding real moves.
+ */
+export const MAX_PLAUSIBLE_DAILY_MOVE_FUND  = 0.15;
+export const MAX_PLAUSIBLE_DAILY_MOVE_STOCK = 0.40;
 
 export function hasExchangeSuffix(ticker: string): boolean {
   return SUFFIXED.test(ticker);
@@ -41,11 +72,34 @@ export async function fetchQuote(ticker: string): Promise<Quote | null> {
     const price = y.price?.regularMarketPrice ?? null;
     if (price != null && price > 0) {
       const pc = y.price?.regularMarketPreviousClose ?? null;
-      return { price, prevClose: pc != null && pc > 0 ? pc : null, source: 'yahoo' };
+      return { price, prevClose: validatePrevClose(t, price, pc), source: 'yahoo' };
     }
   } catch { /* unavailable */ }
 
   return null;
+}
+
+/**
+ * Reject a previous close that implies an implausible single-session move —
+ * that signature means the provider returned a close from the wrong period
+ * (or the wrong listing), not a real gap. Returns null so the UI shows N/A
+ * rather than a fabricated daily figure.
+ */
+export function validatePrevClose(ticker: string, price: number, prevClose: number | null): number | null {
+  if (prevClose == null || !(prevClose > 0)) return null;
+  const isFund = ticker.toUpperCase() in ETF_REGISTRY;
+  const limit = isFund ? MAX_PLAUSIBLE_DAILY_MOVE_FUND : MAX_PLAUSIBLE_DAILY_MOVE_STOCK;
+  const move = Math.abs(price / prevClose - 1);
+  if (move > limit) {
+    if (import.meta.env.DEV) {
+      console.warn(
+        `[portfolio] ${ticker}: rejecting previous close ${prevClose} vs price ${price} ` +
+        `(${(move * 100).toFixed(1)}% implied daily move) — likely a mismatched period or listing.`
+      );
+    }
+    return null;
+  }
+  return prevClose;
 }
 
 // ── batched close history (for 1M/3M returns and correlation) ────────────────

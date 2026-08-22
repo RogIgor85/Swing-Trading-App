@@ -33,6 +33,7 @@ export interface EnrichedHolding {
   sectorEtf: string | null;      // null for diversified/specialty/unclassified
   sectorLabel: string;           // allocation bucket
   sectorIsManual: boolean;
+  staleStoredSector: string | null;  // legacy holding.sector superseded by detection
 
   currentPrice: number | null;
   priceSource: 'manual' | 'live' | 'cost';
@@ -87,29 +88,41 @@ export function isEtf(ticker: string): boolean {
 export function classifyHolding(
   h: Holding,
   detectedSectorEtf: string | null,
-): { sectorEtf: string | null; sectorLabel: string; sectorIsManual: boolean } {
+  /** Deliberate pin from sectorOverrides — only this beats provider detection. */
+  explicitOverride?: string | null,
+): { sectorEtf: string | null; sectorLabel: string; sectorIsManual: boolean; staleStoredSector: string | null } {
   const t = h.ticker.toUpperCase();
   const etf = ETF_REGISTRY[t];
   if (etf) {
-    return { sectorEtf: etf.sectorEtf ?? null, sectorLabel: etf.label, sectorIsManual: false };
+    return { sectorEtf: etf.sectorEtf ?? null, sectorLabel: etf.label, sectorIsManual: false, staleStoredSector: null };
   }
 
   const detectedLabel = detectedSectorEtf ? SECTOR_NAME_BY_ETF[detectedSectorEtf] ?? null : null;
   const stored = (h.sector ?? '').trim();
   const storedIsMeaningful = stored.length > 0 && stored.toLowerCase() !== 'other';
 
-  if (detectedLabel) {
-    if (storedIsMeaningful && stored !== detectedLabel) {
-      // user override — respect it, flag it
-      return { sectorEtf: detectedSectorEtf, sectorLabel: stored, sectorIsManual: true };
-    }
-    return { sectorEtf: detectedSectorEtf, sectorLabel: detectedLabel, sectorIsManual: false };
+  // A deliberate pin always wins
+  if (explicitOverride) {
+    const etfForOverride = Object.entries(SECTOR_NAME_BY_ETF).find(([, n]) => n === explicitOverride)?.[0] ?? null;
+    return { sectorEtf: etfForOverride, sectorLabel: explicitOverride, sectorIsManual: true, staleStoredSector: null };
   }
 
-  if (storedIsMeaningful) {
-    return { sectorEtf: null, sectorLabel: stored, sectorIsManual: true };
+  // Provider classification is authoritative. A disagreeing stored value is
+  // treated as legacy data, surfaced for transparency but not used.
+  if (detectedLabel) {
+    return {
+      sectorEtf: detectedSectorEtf,
+      sectorLabel: detectedLabel,
+      sectorIsManual: false,
+      staleStoredSector: storedIsMeaningful && stored !== detectedLabel ? stored : null,
+    };
   }
-  return { sectorEtf: null, sectorLabel: UNCLASSIFIED_LABEL, sectorIsManual: false };
+
+  // No provider data — fall back to whatever the user stored
+  if (storedIsMeaningful) {
+    return { sectorEtf: null, sectorLabel: stored, sectorIsManual: false, staleStoredSector: null };
+  }
+  return { sectorEtf: null, sectorLabel: UNCLASSIFIED_LABEL, sectorIsManual: false, staleStoredSector: null };
 }
 
 // ── price history helpers ────────────────────────────────────────────────────
@@ -131,10 +144,11 @@ export function enrichHolding(args: {
   detectedSectorEtf: string | null;
   sector: SectorMetrics | null;
   closes?: number[];
+  sectorOverride?: string | null;
 }): Omit<EnrichedHolding, 'allocationPct'> {
-  const { h, price, fxUsdCad, detectedSectorEtf, sector, closes } = args;
+  const { h, price, fxUsdCad, detectedSectorEtf, sector, closes, sectorOverride } = args;
 
-  const cls = classifyHolding(h, detectedSectorEtf);
+  const cls = classifyHolding(h, detectedSectorEtf, sectorOverride);
   const type = positionTypeOf(h.ticker);
 
   // FX factor: applied exactly once, and only to USD-listed securities
@@ -206,6 +220,7 @@ export function enrichHolding(args: {
   return {
     h, ticker: h.ticker, positionType: type, isEtf: type !== 'Individual Stock',
     sectorEtf: cls.sectorEtf, sectorLabel: cls.sectorLabel, sectorIsManual: cls.sectorIsManual,
+    staleStoredSector: cls.staleStoredSector,
     currentPrice, priceSource, prevClose,
     dailyPct, dailyPnlNative, dailyPnlCAD, dailyFromManualPrice: priceSource === 'manual' && dailyPct != null,
     marketValueNative, costBasisNative, pnlNative, pnlPct,
@@ -301,10 +316,13 @@ export interface ConcentrationAnalysis {
   largestPosition: { ticker: string; pct: number } | null;
   largestStock: { ticker: string; pct: number } | null;
   largestEtf: { ticker: string; pct: number } | null;
+  largestBroadEtf: { ticker: string; pct: number } | null;
+  largestGrowthEtf: { ticker: string; pct: number } | null;
   top3StocksPct: number | null;
   top5Pct: number | null;
   largestSector: { label: string; pct: number } | null;
   broadEtfPct: number;
+  growthEtfPct: number;
   holdingsCount: number;
 }
 
@@ -317,7 +335,13 @@ export function computeConcentration(rows: EnrichedHolding[], allocation: Alloca
   const pick = (r?: EnrichedHolding) => r ? { ticker: r.ticker, pct: r.allocationPct } : null;
   const top3StocksPct = stocks.length > 0 ? stocks.slice(0, 3).reduce((s, r) => s + r.allocationPct, 0) : null;
   const top5Pct = byWeight.length > 0 ? byWeight.slice(0, 5).reduce((s, r) => s + r.allocationPct, 0) : null;
-  const broadEtfPct = rows.filter(r => r.isEtf && !r.sectorEtf).reduce((s, r) => s + r.allocationPct, 0);
+
+  // Broad funds and concentrated growth-index funds are counted separately —
+  // a Nasdaq-100 fund is not the diversifier a global all-equity fund is.
+  const broadEtfs  = byWeight.filter(r => r.positionType === 'Broad-Market ETF');
+  const growthEtfs = byWeight.filter(r => r.positionType === 'Growth/Index ETF');
+  const broadEtfPct  = broadEtfs.reduce((s, r) => s + r.allocationPct, 0);
+  const growthEtfPct = growthEtfs.reduce((s, r) => s + r.allocationPct, 0);
 
   // Sector concentration ignores diversified buckets — those aren't a sector bet
   const sectorRows = allocation.filter(a => !a.isDiversified && a.label !== UNCLASSIFIED_LABEL);
@@ -345,10 +369,18 @@ export function computeConcentration(rows: EnrichedHolding[], allocation: Alloca
     else if (largestSector.pct >= C.sectorHigh) score += 1;
   }
   if (broadEtfPct > 0) {
-    reasons.push(`Broad-market ETFs: ${broadEtfPct.toFixed(1)}%`);
-    // Diversified ETFs REDUCE concentration risk
+    reasons.push(`Broad-market ETFs: ${broadEtfPct.toFixed(1)}% (full diversification credit)`);
+    // Genuinely diversified funds REDUCE concentration risk
     if (broadEtfPct >= 50) score -= 2;
     else if (broadEtfPct >= 25) score -= 1;
+  }
+  if (growthEtfPct > 0) {
+    reasons.push(`Growth / Nasdaq ETFs: ${growthEtfPct.toFixed(1)}% (partial credit — overlaps large-cap tech)`);
+    // Only half the credit of a broad fund, and a large position is itself a
+    // concentrated bet on large-cap growth
+    if (growthEtfPct >= 50) score -= 1;
+    else if (growthEtfPct >= 25) score -= 0.5;
+    if (growthEtfPct >= C.growthEtfConcentrated) score += 1;
   }
   if (rows.length > 0 && rows.length < C.minHoldingsForLow) {
     reasons.push(`Only ${rows.length} holding${rows.length === 1 ? '' : 's'}`);
@@ -363,7 +395,9 @@ export function computeConcentration(rows: EnrichedHolding[], allocation: Alloca
     largestPosition: pick(byWeight[0]),
     largestStock: ls,
     largestEtf: pick(etfs[0]),
-    top3StocksPct, top5Pct, largestSector, broadEtfPct,
+    largestBroadEtf: pick(broadEtfs[0]),
+    largestGrowthEtf: pick(growthEtfs[0]),
+    top3StocksPct, top5Pct, largestSector, broadEtfPct, growthEtfPct,
     holdingsCount: rows.length,
   };
 }
