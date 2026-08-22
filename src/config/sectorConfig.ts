@@ -19,7 +19,7 @@ export const BENCHMARK_ETF = 'SPY';
 // current data tier). Centralized here; never hard-coded in components.
 // Breadth computed from these is labeled "top-holdings breadth".
 export const SECTOR_ETFS: SectorDef[] = [
-  { etf: 'XLK',  name: 'Technology',             short: 'Tech',        cyclical: true,  constituents: ['AAPL', 'MSFT', 'NVDA', 'AVGO', 'ORCL', 'CRM', 'AMD', 'ADBE', 'CSCO', 'ACN', 'IBM', 'NOW', 'TXN', 'QCOM', 'INTU'] },
+  { etf: 'XLK',  name: 'Technology',             short: 'Tech',        cyclical: true,  constituents: ['AAPL', 'MSFT', 'NVDA', 'AVGO', 'ORCL', 'CRM', 'AMD', 'ADBE', 'CSCO', 'ACN', 'IBM', 'NOW', 'TXN', 'QCOM', 'ANET'] },
   { etf: 'XLF',  name: 'Financials',             short: 'Financials',  cyclical: true,  constituents: ['BRK-B', 'JPM', 'V', 'MA', 'BAC', 'WFC', 'GS', 'MS', 'AXP', 'C', 'SCHW', 'BLK', 'SPGI', 'PGR', 'CB'] },
   { etf: 'XLV',  name: 'Healthcare',             short: 'Healthcare',  cyclical: false, constituents: ['LLY', 'UNH', 'JNJ', 'ABBV', 'MRK', 'TMO', 'ABT', 'ISRG', 'AMGN', 'PFE', 'DHR', 'BSX', 'VRTX', 'SYK', 'GILD'] },
   { etf: 'XLI',  name: 'Industrials',            short: 'Industrials', cyclical: true,  constituents: ['GE', 'CAT', 'RTX', 'UBER', 'HON', 'UNP', 'BA', 'DE', 'LMT', 'ETN', 'ADP', 'MMM', 'UPS', 'PH', 'TT'] },

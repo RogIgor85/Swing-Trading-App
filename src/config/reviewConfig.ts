@@ -46,23 +46,63 @@ export const POSITION_FIT_WEIGHTS = {
   targetValuation:    10,
 };
 
-/** Portfolio Health (0–10) — every component is shown to the user. */
+/**
+ * Portfolio Health (0–10) — STRUCTURAL quality. Answers "how well built is
+ * this portfolio", not "are my sectors in favour this month". Tactical inputs
+ * total only 10% so the score moves slowly; the rest lives in Market Alignment.
+ */
 export const PORTFOLIO_HEALTH_WEIGHTS = {
-  positionQuality: 30,
-  concentration:   25,
-  diversification: 15,
-  trendMomentum:   10,
-  sectorAlignment: 10,
-  drawdownRisk:    10,
+  assetQuality:    35,   // value-weighted Company / ETF quality
+  positionFit:     20,   // value-weighted Position Fit
+  diversification: 20,
+  concentration:   15,
+  trendStrength:    5,   // tactical
+  sectorAlignment:  5,   // tactical
 };
 
 export const HEALTH_COMPONENT_LABELS: Record<keyof typeof PORTFOLIO_HEALTH_WEIGHTS, string> = {
-  positionQuality: 'Average Position Quality',
-  concentration:   'Concentration',
+  assetQuality:    'Weighted Asset Quality',
+  positionFit:     'Position Fit',
   diversification: 'Diversification',
-  trendMomentum:   'Momentum / Trend',
-  sectorAlignment: 'Sector Rotation Alignment',
-  drawdownRisk:    'Drawdown / Risk',
+  concentration:   'Concentration',
+  trendStrength:   'Trend / Relative Strength',
+  sectorAlignment: 'Sector Alignment',
+};
+
+/** Market Alignment (0–10) — tactical, expected to move quickly. */
+export const MARKET_ALIGNMENT_WEIGHTS = {
+  sectorRotation:   40,
+  relativeStrength: 25,
+  trendMomentum:    25,
+  marketRegime:     10,
+};
+
+export const HEALTH_BANDS: Array<[number, string]> = [
+  [8.5, 'EXCELLENT'],
+  [7.0, 'HEALTHY'],
+  [5.5, 'MIXED'],
+  [4.0, 'WEAK'],
+  [0,   'POOR'],
+];
+
+export const ALIGNMENT_BANDS: Array<[number, string]> = [
+  [8.0, 'STRONG TAILWIND'],
+  [6.5, 'POSITIVE'],
+  [4.5, 'MIXED'],
+  [3.0, 'NEGATIVE'],
+  [0,   'STRONG HEADWIND'],
+];
+
+/**
+ * Concentration tolerance by asset type. A broad diversified fund is not a
+ * concentrated bet — 32% of a portfolio in an all-equity global ETF is a
+ * sensible core allocation, not a risk to flag.
+ */
+export const CONCENTRATION_BY_TYPE = {
+  broadEtf:  { elevated: 50, high: 65, excessive: 80 },
+  growthEtf: { elevated: 15, high: 25, excessive: 40 },
+  sectorEtf: { elevated: 12, high: 20, excessive: 30 },
+  stock:     { elevated: 10, high: 15, excessive: 20 },
 };
 
 /** Combined exposure to one underlying company/fund, % of portfolio. */
@@ -108,9 +148,26 @@ of purchases, so it is not a time-weighted or money-weighted return.`;
 
 export const PORTFOLIO_HEALTH_HELP =
 `Portfolio Health (0–10)
-A weighted blend of six measured components, each scored 0–10 and shown below
-with its weight. Nothing here is estimated — every component is computed from
-your holdings, their price history and current sector rotation data.`;
+How well constructed and fundamentally healthy the portfolio is — a structural
+measure, not a market-timing one.
+
+Weighted Asset Quality 35% · Position Fit 20% · Diversification 20% ·
+Concentration 15% · Trend 5% · Sector Alignment 5%
+
+Current sector rotation and momentum carry only 10% combined, so a temporary
+rotation against your sectors does not make a well-built portfolio unhealthy.
+Benchmark performance is deliberately excluded.`;
+
+export const MARKET_ALIGNMENT_HELP =
+`Market Alignment (0–10)
+How well your holdings sit with current market conditions — a tactical measure
+that can change quickly.
+
+Sector Rotation 40% · Relative Strength 25% · Trend / Momentum 25% ·
+Market Regime 10%
+
+A weak reading does not mean the portfolio is unhealthy; it means the current
+rotation is not favouring what you own.`;
 
 export const COMPANY_QUALITY_HELP =
 `Company Quality (0–10)

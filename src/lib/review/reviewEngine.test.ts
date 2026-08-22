@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeCompanyQuality, computeEtfRole, computePositionFit, deriveStatus,
-  buildAction, computePortfolioHealth, buildAlerts,
-  sectorLabelFor, isBroadEtf, isGrowthEtf, positionTypeFor,
+  buildAction, computePortfolioHealth, computeMarketAlignment, buildAlerts,
+  isOverweightExposure, sectorLabelFor, isBroadEtf, isGrowthEtf, positionTypeFor,
 } from './reviewEngine';
 import type { CompanyQuality, PositionReview } from './reviewEngine';
 import { computePortfolioYtd } from './portfolioReturn';
@@ -299,46 +299,159 @@ describe('portfolio health', () => {
     };
   }
 
-  it('exposes every weighted component', () => {
-    const h = computePortfolioHealth({
-      reviews: [review()], largestCombinedExposurePct: 26.5, distinctSectors: 4,
-      broadEtfPct: 32, avgRs: 0.08, avgSectorPressure: -12, worstDrawdownPct: -20,
-    })!;
-    expect(h.components).toHaveLength(6);
+  /** Portfolio resembling the reported one: quality ~8, fit ~7, 32% XEQT, MSFT 26.5%. */
+  function realisticInput(over: Partial<Parameters<typeof computePortfolioHealth>[0]> = {}) {
+    const etfQuality = computeEtfRole('XEQT.TO', 0);
+    const reviews = [
+      review({ ticker: 'XEQT.TO', base: 'XEQT', companyQuality: etfQuality, positionFit: 8.5, marketValueNative: 3200, positionPct: 32, status: 'CORE', isEtf: true }),
+      review({ ticker: 'MSFT', base: 'MSFT', positionFit: 7.2, marketValueNative: 1300, positionPct: 13 }),
+      review({ ticker: 'MSFT.TO', base: 'MSFT', positionFit: 6.9, marketValueNative: 1350, positionPct: 13.5 }),
+      review({ ticker: 'QQC.TO', base: 'QQC', companyQuality: computeEtfRole('QQC.TO', 36), positionFit: 6.5, marketValueNative: 1040, positionPct: 10.4, isEtf: true }),
+      review({ ticker: 'META', base: 'META', positionFit: 7.4, marketValueNative: 900, positionPct: 9 }),
+      review({ ticker: 'ORCL', base: 'ORCL', positionFit: 4.2, marketValueNative: 430, positionPct: 4.3, status: 'REVIEW', pnlPct: -30 }),
+      review({ ticker: 'TSLA', base: 'TSLA', positionFit: 4.0, marketValueNative: 380, positionPct: 3.8, status: 'REVIEW', pnlPct: -44 }),
+      review({ ticker: 'NFLX', base: 'NFLX', positionFit: 6.8, marketValueNative: 700, positionPct: 7 }),
+      review({ ticker: 'ANET', base: 'ANET', positionFit: 7.0, marketValueNative: 700, positionPct: 7 }),
+    ];
+    const combinedExposure = new Map<string, number>([
+      ['XEQT', 32], ['MSFT', 26.5], ['QQC', 10.4], ['META', 9], ['ORCL', 4.3], ['TSLA', 3.8], ['NFLX', 7], ['ANET', 7],
+    ]);
+    const representativeTicker = new Map<string, string>([
+      ['XEQT', 'XEQT.TO'], ['MSFT', 'MSFT'], ['QQC', 'QQC.TO'], ['META', 'META'],
+      ['ORCL', 'ORCL'], ['TSLA', 'TSLA'], ['NFLX', 'NFLX'], ['ANET', 'ANET'],
+    ]);
+    return {
+      reviews, combinedExposure, representativeTicker,
+      distinctSectors: 4, largestSectorPct: 33, broadEtfPct: 32, growthEtfPct: 10.4,
+      avgRs: 0.08, avgSectorPressure: -14,
+      ...over,
+    };
+  }
+
+  it('exposes every weighted component in the specified order', () => {
+    const h = computePortfolioHealth(realisticInput())!;
     expect(h.components.map(c => c.key)).toEqual([
-      'positionQuality', 'concentration', 'diversification',
-      'trendMomentum', 'sectorAlignment', 'drawdownRisk',
+      'assetQuality', 'positionFit', 'diversification',
+      'concentration', 'trendStrength', 'sectorAlignment',
     ]);
     for (const c of h.components) {
       expect(c.score).toBeGreaterThanOrEqual(0);
       expect(c.score).toBeLessThanOrEqual(10);
-      expect(c.weight).toBeGreaterThan(0);
       expect(c.detail.length).toBeGreaterThan(0);
     }
+    // structural factors dominate; tactical is only 10%
+    const tactical = h.components.filter(c => c.key === 'trendStrength' || c.key === 'sectorAlignment')
+      .reduce((s, c) => s + c.weight, 0);
+    expect(tactical).toBe(10);
   });
 
   it('equals the weighted mean of its components', () => {
-    const h = computePortfolioHealth({
-      reviews: [review()], largestCombinedExposurePct: 15, distinctSectors: 5,
-      broadEtfPct: 30, avgRs: 0.05, avgSectorPressure: 5, worstDrawdownPct: -10,
-    })!;
+    const h = computePortfolioHealth(realisticInput())!;
     const totalW = h.components.reduce((s, c) => s + c.weight, 0);
     const expected = h.components.reduce((s, c) => s + c.score * c.weight, 0) / totalW;
     expect(h.score).toBeCloseTo(expected, 6);
   });
 
-  it('penalizes heavy concentration', () => {
-    const base = { reviews: [review()], distinctSectors: 5, broadEtfPct: 30, avgRs: 0.05, avgSectorPressure: 0, worstDrawdownPct: -10 };
-    const concentrated = computePortfolioHealth({ ...base, largestCombinedExposurePct: 45 })!;
-    const spread = computePortfolioHealth({ ...base, largestCombinedExposurePct: 9 })!;
-    expect(spread.score).toBeGreaterThan(concentrated.score);
+  it('rates a structurally sound portfolio well above WEAK', () => {
+    const h = computePortfolioHealth(realisticInput())!;
+    // quality ~8, fit ~7, 32% broad core, one real concentration issue
+    expect(h.score).toBeGreaterThan(6.0);
+    expect(['EXCELLENT', 'HEALTHY', 'MIXED']).toContain(h.label);
+  });
+
+  it('does NOT treat a 32% broad-market ETF as concentration', () => {
+    const withEtf = computePortfolioHealth(realisticInput())!;
+    // Same weight moved into a single stock instead
+    const asStock = computePortfolioHealth(realisticInput({
+      combinedExposure: new Map([...realisticInput().combinedExposure].map(([k, v]) => k === 'XEQT' ? ['BIGCO', v] : [k, v])),
+      representativeTicker: new Map([...realisticInput().representativeTicker].map(([k, v]) => k === 'XEQT' ? ['BIGCO', 'BIGCO'] : [k, v])),
+      broadEtfPct: 0,
+    }))!;
+    const cWith = withEtf.components.find(c => c.key === 'concentration')!.score;
+    const cAs = asStock.components.find(c => c.key === 'concentration')!.score;
+    expect(cWith).toBeGreaterThan(cAs);
+    expect(withEtf.score).toBeGreaterThan(asStock.score);
+  });
+
+  it('still penalizes a genuine single-company overweight', () => {
+    const normal = computePortfolioHealth(realisticInput({
+      combinedExposure: new Map([['XEQT', 32], ['MSFT', 8], ['META', 9]]),
+      representativeTicker: new Map([['XEQT', 'XEQT.TO'], ['MSFT', 'MSFT'], ['META', 'META']]),
+    }))!;
+    const heavy = computePortfolioHealth(realisticInput())!;
+    const cn = normal.components.find(c => c.key === 'concentration')!.score;
+    const ch = heavy.components.find(c => c.key === 'concentration')!.score;
+    expect(cn).toBeGreaterThan(ch);
+    expect(heavy.risks.some(r => r.includes('MSFT') && r.includes('26.5'))).toBe(true);
+  });
+
+  it('lets a rotation downturn move Health only slightly', () => {
+    const good = computePortfolioHealth(realisticInput({ avgSectorPressure: 40, avgRs: 0.15 }))!;
+    const bad  = computePortfolioHealth(realisticInput({ avgSectorPressure: -60, avgRs: -0.15 }))!;
+    expect(good.score - bad.score).toBeLessThan(1.2);   // 10% combined weight
+  });
+
+  it('weights review holdings by value, not by count', () => {
+    const smallReview = computePortfolioHealth(realisticInput())!;
+    // Same two REVIEW holdings, but now a third of the portfolio
+    const bigReview = computePortfolioHealth(realisticInput({
+      reviews: realisticInput().reviews.map(r =>
+        r.status === 'REVIEW' ? { ...r, marketValueNative: 3000, positionPct: 30 } : r),
+    }))!;
+    expect(bigReview.components.find(c => c.key === 'positionFit')!.score)
+      .toBeLessThan(smallReview.components.find(c => c.key === 'positionFit')!.score);
+  });
+
+  it('surfaces explicit risks and positives', () => {
+    const h = computePortfolioHealth(realisticInput())!;
+    expect(h.positives.some(p => /broad diversified core/i.test(p))).toBe(true);
+    expect(h.risks.length).toBeGreaterThan(0);
   });
 
   it('returns null for an empty portfolio', () => {
     expect(computePortfolioHealth({
-      reviews: [], largestCombinedExposurePct: 0, distinctSectors: 0,
-      broadEtfPct: 0, avgRs: null, avgSectorPressure: null, worstDrawdownPct: null,
+      reviews: [], combinedExposure: new Map(), representativeTicker: new Map(),
+      distinctSectors: 0, largestSectorPct: 0, broadEtfPct: 0, growthEtfPct: 0,
+      avgRs: null, avgSectorPressure: null,
     })).toBeNull();
+  });
+});
+
+describe('Market Alignment', () => {
+  it('is separate from Health and reflects tactical conditions', () => {
+    const weak = computeMarketAlignment({ avgSectorPressure: -50, avgRs: -0.12, avgTrend3M: -0.2, regime: 'Risk-Off', sectorNotes: [] })!;
+    const strong = computeMarketAlignment({ avgSectorPressure: 45, avgRs: 0.15, avgTrend3M: 0.3, regime: 'Risk-On', sectorNotes: [] })!;
+    expect(strong.score).toBeGreaterThan(weak.score);
+    expect(weak.label).toMatch(/HEADWIND|NEGATIVE/);
+    expect(strong.label).toMatch(/TAILWIND|POSITIVE/);
+  });
+
+  it('weights sector rotation most heavily', () => {
+    const c = computeMarketAlignment({ avgSectorPressure: 0, avgRs: 0, avgTrend3M: 0, regime: 'Mixed', sectorNotes: [] })!;
+    const rotation = c.components.find(x => x.label === 'Sector rotation')!;
+    expect(rotation.weight).toBe(40);
+    expect(c.components.reduce((s, x) => s + x.weight, 0)).toBe(100);
+  });
+
+  it('returns null when no tactical data exists', () => {
+    expect(computeMarketAlignment({ avgSectorPressure: null, avgRs: null, avgTrend3M: null, regime: null, sectorNotes: [] })).toBeNull();
+  });
+});
+
+describe('overweight classification by asset type', () => {
+  it('does not flag a broad core ETF at 32%', () => {
+    expect(isOverweightExposure('XEQT.TO', 32)).toBe(false);
+    expect(isOverweightExposure('XEQT.TO', 85)).toBe(true);
+  });
+
+  it('flags a single company at 26.5%', () => {
+    expect(isOverweightExposure('MSFT', 26.5)).toBe(true);
+    expect(isOverweightExposure('MSFT', 12)).toBe(false);
+  });
+
+  it('applies moderate rules to a growth ETF', () => {
+    expect(isOverweightExposure('QQC.TO', 10.4)).toBe(false);
+    expect(isOverweightExposure('QQC.TO', 45)).toBe(true);
   });
 });
 
@@ -359,12 +472,34 @@ describe('alerts', () => {
   });
 
   it('names overweight underlying companies', () => {
-    const alerts = buildAlerts([r('STRONG HOLD', 'MSFT')], new Map([['MSFT', 26.5]]));
-    expect(alerts.some(a => a.includes('MSFT') && a.includes('26.5'))).toBe(true);
+    const alerts = buildAlerts([r('STRONG HOLD', 'MSFT')], new Map([['MSFT', 26.5]]),
+      new Map([['MSFT', 'MSFT']]));
+    expect(alerts.some(a => a.includes('MSFT') && a.includes('26.5') && /OVERWEIGHT/.test(a))).toBe(true);
+  });
+
+  it('does NOT flag a broad-market ETF at 32% as overweight', () => {
+    const alerts = buildAlerts([r('CORE', 'XEQT.TO')], new Map([['XEQT', 32]]),
+      new Map([['XEQT', 'XEQT.TO']]));
+    expect(alerts.join(' ')).not.toMatch(/XEQT/);
+  });
+
+  it('reports the value share of holdings needing review', () => {
+    const reviews = [
+      { status: 'REVIEW', ticker: 'A', marketValueNative: 430 },
+      { status: 'STRONG HOLD', ticker: 'B', marketValueNative: 9570 },
+    ] as PositionReview[];
+    const alerts = buildAlerts(reviews, new Map());
+    expect(alerts.some(a => /4\.3% of value/.test(a))).toBe(true);
+  });
+
+  it('flags elevated growth-ETF overlap', () => {
+    const alerts = buildAlerts([r('HOLD', 'QQC.TO')], new Map(), new Map(), 30);
+    expect(alerts.some(a => /Growth \/ Nasdaq ETF overlap/.test(a))).toBe(true);
   });
 
   it('stays quiet for a clean portfolio', () => {
-    expect(buildAlerts([r('STRONG HOLD', 'A'), r('HOLD', 'B')], new Map([['A', 8]]))).toEqual([]);
+    expect(buildAlerts([r('STRONG HOLD', 'A'), r('HOLD', 'B')], new Map([['A', 8]]),
+      new Map([['A', 'A']]))).toEqual([]);
   });
 });
 

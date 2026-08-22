@@ -14,7 +14,8 @@
 import {
   COMPANY_QUALITY_WEIGHTS, ETF_ROLE_WEIGHTS, POSITION_FIT_WEIGHTS,
   PORTFOLIO_HEALTH_WEIGHTS, EXPOSURE_THRESHOLDS, DRAWDOWN_THRESHOLDS,
-  RELATIVE_STRENGTH_THRESHOLDS, FIT_BANDS,
+  RELATIVE_STRENGTH_THRESHOLDS, FIT_BANDS, MARKET_ALIGNMENT_WEIGHTS,
+  HEALTH_BANDS, ALIGNMENT_BANDS, CONCENTRATION_BY_TYPE, HEALTH_COMPONENT_LABELS,
 } from '../../config/reviewConfig';
 import type { ReviewStatus } from '../../config/reviewConfig';
 import { ETF_REGISTRY, SECTOR_NAME_BY_ETF, DIVERSIFIED_LABEL, GROWTH_ETF_LABEL } from '../../config/portfolioConfig';
@@ -416,90 +417,235 @@ export interface PortfolioHealth {
   score: number;
   label: string;
   components: HealthComponent[];
+  risks: string[];
+  positives: string[];
 }
 
-export function computePortfolioHealth(args: {
+export interface MarketAlignment {
+  score: number;
+  label: string;
+  components: Array<{ label: string; score: number; weight: number; detail: string }>;
+  notes: string[];
+}
+
+function labelFor(score: number, bands: Array<[number, string]>): string {
+  for (const [t, l] of bands) if (score >= t) return l;
+  return bands[bands.length - 1][1];
+}
+
+/** Concentration tolerance for a holding, by what it actually is. */
+function concentrationTier(ticker: string) {
+  const type = positionTypeFor(ticker);
+  if (type === 'Broad-Market ETF') return CONCENTRATION_BY_TYPE.broadEtf;
+  if (type === 'Growth/Index ETF') return CONCENTRATION_BY_TYPE.growthEtf;
+  if (type === 'Sector ETF')       return CONCENTRATION_BY_TYPE.sectorEtf;
+  return CONCENTRATION_BY_TYPE.stock;
+}
+
+/** True when combined exposure to this underlying is genuinely overweight. */
+export function isOverweightExposure(ticker: string, combinedPct: number): boolean {
+  return combinedPct >= concentrationTier(ticker).excessive;
+}
+
+export interface HealthInput {
   reviews: PositionReview[];
-  largestCombinedExposurePct: number;
+  /** base ticker → combined % of portfolio */
+  combinedExposure: Map<string, number>;
+  /** base ticker → a representative ticker (for type lookup) */
+  representativeTicker: Map<string, string>;
   distinctSectors: number;
+  largestSectorPct: number;
   broadEtfPct: number;
+  growthEtfPct: number;
   avgRs: number | null;
   avgSectorPressure: number | null;
-  worstDrawdownPct: number | null;
-}): PortfolioHealth | null {
-  const { reviews } = args;
+}
+
+export function computePortfolioHealth(a: HealthInput): PortfolioHealth | null {
+  const { reviews } = a;
   if (reviews.length === 0) return null;
   const W = PORTFOLIO_HEALTH_WEIGHTS;
-
   const totalValue = reviews.reduce((s, r) => s + r.marketValueNative, 0) || 1;
-  // Value-weighted position quality (Position Fit reflects both business and fit)
-  const positionQuality = clamp10(
-    reviews.reduce((s, r) => s + r.positionFit * r.marketValueNative, 0) / totalValue
-  );
+  const wt = (r: PositionReview) => r.marketValueNative / totalValue;
 
-  const concentration = clamp10(band(-args.largestCombinedExposurePct, [
-    [-70, 1], [-45, 2.5], [-30, 4], [-22, 5.2], [-15, 6.8], [-10, 8], [-6, 9.2],
-  ]));
+  const risks: string[] = [];
+  const positives: string[] = [];
 
-  const diversification = clamp10(
-    band(args.distinctSectors, [[0, 2], [2, 4], [3, 5.5], [4, 6.5], [5, 7.5], [7, 8.5], [9, 9.5]])
-    + (args.broadEtfPct >= 25 ? 1 : args.broadEtfPct >= 10 ? 0.5 : 0)
-  );
+  // ── Asset Quality (35%) — value-weighted business / fund quality ─────────
+  const assetQuality = clamp10(reviews.reduce((s, r) => s + r.companyQuality.score * wt(r), 0));
 
-  const trendMomentum = args.avgRs == null ? 5
-    : clamp10(band(args.avgRs, [[-1, 2], [-0.10, 3.5], [-0.03, 4.5], [0.03, 6], [0.08, 7.5], [0.20, 9]]));
+  // ── Position Fit (20%) — value-weighted ──────────────────────────────────
+  const positionFit = clamp10(reviews.reduce((s, r) => s + r.positionFit * wt(r), 0));
 
-  const sectorAlignment = args.avgSectorPressure == null ? 5
-    : clamp10(band(args.avgSectorPressure, [[-100, 2], [-50, 3.5], [-22, 4.5], [-5, 5.5], [5, 6.5], [22, 8], [55, 9.5]]));
+  // ── Diversification (20%) ────────────────────────────────────────────────
+  const uniqueUnderlying = a.combinedExposure.size;
+  let diversification =
+    band(a.distinctSectors, [[0, 3], [2, 4.5], [3, 5.5], [4, 6.5], [5, 7.3], [7, 8.2], [9, 9]]) * 0.45
+    + band(uniqueUnderlying, [[0, 3], [3, 4.5], [5, 6], [8, 7.5], [12, 8.5], [18, 9.5]]) * 0.25
+    + band(-a.largestSectorPct, [[-80, 2], [-55, 4], [-40, 5.5], [-30, 7], [-22, 8.2], [-15, 9]]) * 0.30;
+  // Broad diversified funds genuinely improve diversification
+  const broadBonus = a.broadEtfPct >= 40 ? 1.5 : a.broadEtfPct >= 25 ? 1.1 : a.broadEtfPct >= 10 ? 0.6 : 0;
+  diversification = clamp10(diversification + broadBonus);
+  if (a.broadEtfPct >= 10) {
+    positives.push(`${a.broadEtfPct.toFixed(1)}% held in broad diversified core funds`);
+  }
 
-  const drawdownRisk = args.worstDrawdownPct == null ? 6
-    : clamp10(band(args.worstDrawdownPct, [[-100, 1.5], [-45, 3], [-30, 4.5], [-20, 6], [-10, 7.5], [0, 9]]));
+  // ── Concentration (15%) — type-aware, counted ONCE per underlying ────────
+  // Broad funds are excluded: a large core-ETF weight is design, not risk.
+  const stockExposures: Array<[string, number]> = [];
+  for (const [base, pct] of a.combinedExposure) {
+    const ticker = a.representativeTicker.get(base) ?? base;
+    if (positionTypeFor(ticker) === 'Broad-Market ETF') continue;
+    stockExposures.push([base, pct]);
+  }
+  stockExposures.sort((x, y) => y[1] - x[1]);
+
+  const largestStockPct = stockExposures[0]?.[1] ?? 0;
+  const top3Pct = stockExposures.slice(0, 3).reduce((s, [, p]) => s + p, 0);
+
+  const T = CONCENTRATION_BY_TYPE.stock;
+  const sLargest = band(-largestStockPct, [[-60, 1], [-40, 2.5], [-T.excessive - 5, 4], [-T.excessive, 5], [-T.high, 6.5], [-T.elevated, 8], [-5, 9.5]]);
+  const sTop3    = band(-top3Pct, [[-90, 1.5], [-70, 3], [-55, 4.5], [-45, 6], [-32, 7.5], [-22, 9]]);
+  const sSector  = band(-a.largestSectorPct, [[-80, 1.5], [-60, 3], [-45, 4.5], [-35, 6], [-25, 7.5], [-18, 9]]);
+  const sGrowth  = band(-a.growthEtfPct, [[-60, 3], [-40, 4.5], [-25, 6], [-15, 7.5], [-5, 9]]);
+  const concentration = clamp10(sLargest * 0.40 + sTop3 * 0.25 + sSector * 0.20 + sGrowth * 0.15);
+
+  if (largestStockPct >= T.excessive && stockExposures[0]) {
+    risks.push(`${stockExposures[0][0]} combined exposure ${largestStockPct.toFixed(1)}% — overweight for a single company`);
+  } else if (largestStockPct >= T.high && stockExposures[0]) {
+    risks.push(`${stockExposures[0][0]} combined exposure ${largestStockPct.toFixed(1)}% — high for a single company`);
+  }
+  if (a.largestSectorPct >= 35) risks.push(`Largest sector exposure ${a.largestSectorPct.toFixed(1)}%`);
+  if (a.growthEtfPct >= CONCENTRATION_BY_TYPE.growthEtf.high) {
+    risks.push(`Growth / Nasdaq funds ${a.growthEtfPct.toFixed(1)}% — overlaps directly held large-cap names`);
+  }
+  if (assetQuality >= 7.5) positives.push(`High weighted asset quality (${assetQuality.toFixed(1)}/10)`);
+  if (positionFit >= 6.5) positives.push(`Most capital sits in positions with sound fit (${positionFit.toFixed(1)}/10)`);
+
+  // Value-weighted drag from holdings needing attention — a 4% REVIEW must not
+  // weigh the same as a 30% one.
+  const attentionWeight = reviews
+    .filter(r => r.status === 'REVIEW' || r.status === 'EXIT')
+    .reduce((s, r) => s + wt(r), 0) * 100;
+  if (attentionWeight >= 5) {
+    risks.push(`${attentionWeight.toFixed(1)}% of portfolio value in holdings needing review`);
+  }
+
+  // ── Tactical (10% combined) ──────────────────────────────────────────────
+  const trendStrength = a.avgRs == null ? 5
+    : clamp10(band(a.avgRs, [[-1, 2], [-0.10, 3.5], [-0.03, 4.5], [0.03, 6], [0.08, 7.5], [0.20, 9]]));
+  const sectorAlignment = a.avgSectorPressure == null ? 5
+    : clamp10(band(a.avgSectorPressure, [[-100, 2], [-50, 3.5], [-22, 4.5], [-5, 5.5], [5, 6.5], [22, 8], [55, 9.5]]));
+  if (a.avgRs != null && a.avgRs > 0.03) positives.push(`Holdings are outperforming their sectors on average (${pctDec(a.avgRs)})`);
 
   const components: HealthComponent[] = [
-    { key: 'positionQuality', label: 'Average Position Quality', score: positionQuality, weight: W.positionQuality,
-      detail: 'Value-weighted Position Fit across holdings' },
-    { key: 'concentration', label: 'Concentration', score: concentration, weight: W.concentration,
-      detail: `Largest combined underlying exposure ${args.largestCombinedExposurePct.toFixed(1)}%` },
-    { key: 'diversification', label: 'Diversification', score: diversification, weight: W.diversification,
-      detail: `${args.distinctSectors} sector${args.distinctSectors === 1 ? '' : 's'}, ${args.broadEtfPct.toFixed(0)}% in broad-market funds` },
-    { key: 'trendMomentum', label: 'Momentum / Trend', score: trendMomentum, weight: W.trendMomentum,
-      detail: args.avgRs == null ? 'Relative strength unavailable' : `Average relative strength ${pctDec(args.avgRs)} vs sector` },
-    { key: 'sectorAlignment', label: 'Sector Rotation Alignment', score: sectorAlignment, weight: W.sectorAlignment,
-      detail: args.avgSectorPressure == null ? 'Rotation data unavailable' : `Weighted sector pressure ${args.avgSectorPressure >= 0 ? '+' : ''}${args.avgSectorPressure.toFixed(0)}` },
-    { key: 'drawdownRisk', label: 'Drawdown / Risk', score: drawdownRisk, weight: W.drawdownRisk,
-      detail: args.worstDrawdownPct == null ? 'No drawdown data' : `Worst position ${args.worstDrawdownPct.toFixed(1)}%` },
+    { key: 'assetQuality', label: HEALTH_COMPONENT_LABELS.assetQuality, score: assetQuality, weight: W.assetQuality,
+      detail: 'Value-weighted company and ETF quality' },
+    { key: 'positionFit', label: HEALTH_COMPONENT_LABELS.positionFit, score: positionFit, weight: W.positionFit,
+      detail: 'Value-weighted Position Fit' },
+    { key: 'diversification', label: HEALTH_COMPONENT_LABELS.diversification, score: diversification, weight: W.diversification,
+      detail: `${a.distinctSectors} sectors · ${uniqueUnderlying} underlyings · ${a.broadEtfPct.toFixed(0)}% broad funds` },
+    { key: 'concentration', label: HEALTH_COMPONENT_LABELS.concentration, score: concentration, weight: W.concentration,
+      detail: stockExposures[0]
+        ? `Largest company ${stockExposures[0][0]} ${largestStockPct.toFixed(1)}% · top 3 ${top3Pct.toFixed(1)}% (broad funds excluded)`
+        : 'No individual-company concentration' },
+    { key: 'trendStrength', label: HEALTH_COMPONENT_LABELS.trendStrength, score: trendStrength, weight: W.trendStrength,
+      detail: a.avgRs == null ? 'Relative strength unavailable' : `Average relative strength ${pctDec(a.avgRs)} vs sector` },
+    { key: 'sectorAlignment', label: HEALTH_COMPONENT_LABELS.sectorAlignment, score: sectorAlignment, weight: W.sectorAlignment,
+      detail: a.avgSectorPressure == null ? 'Rotation data unavailable' : `Weighted sector pressure ${a.avgSectorPressure >= 0 ? '+' : ''}${a.avgSectorPressure.toFixed(0)}` },
   ];
 
   const totalW = components.reduce((s, c) => s + c.weight, 0);
-  const score = components.reduce((s, c) => s + c.score * c.weight, 0) / totalW;
+  const score = clamp10(components.reduce((s, c) => s + c.score * c.weight, 0) / totalW);
 
-  const label =
-    score >= 8 ? 'STRONG' : score >= 6.5 ? 'HEALTHY' : score >= 5 ? 'MIXED' : score >= 3.5 ? 'NEEDS ATTENTION' : 'AT RISK';
+  if (import.meta.env?.DEV) {
+    // eslint-disable-next-line no-console
+    console.table(components.map(c => ({ component: c.label, score: +c.score.toFixed(2), weight: `${c.weight}%`, contribution: +(c.score * c.weight / totalW).toFixed(3) })));
+    // eslint-disable-next-line no-console
+    console.log('[health] final', score.toFixed(2), '| broad-ETF excluded from concentration:',
+      [...a.combinedExposure].filter(([b]) => positionTypeFor(a.representativeTicker.get(b) ?? b) === 'Broad-Market ETF').map(([b, p]) => `${b} ${p.toFixed(1)}%`));
+  }
 
-  return { score: clamp10(score), label, components };
+  return { score, label: labelFor(score, HEALTH_BANDS), components, risks, positives };
+}
+
+/** Tactical read on current conditions — deliberately separate from Health. */
+export function computeMarketAlignment(a: {
+  avgSectorPressure: number | null;
+  avgRs: number | null;
+  avgTrend3M: number | null;
+  regime: 'Risk-On' | 'Risk-Off' | 'Mixed' | null;
+  sectorNotes: string[];
+}): MarketAlignment | null {
+  const W = MARKET_ALIGNMENT_WEIGHTS;
+  const sRotation = a.avgSectorPressure == null ? null
+    : clamp10(band(a.avgSectorPressure, [[-100, 1.5], [-50, 3], [-22, 4.3], [-5, 5.3], [5, 6.3], [22, 7.8], [55, 9.3]]));
+  const sRs = a.avgRs == null ? null
+    : clamp10(band(a.avgRs, [[-1, 1.5], [-0.10, 3], [-0.03, 4.5], [0.03, 6], [0.08, 7.5], [0.20, 9.3]]));
+  const sTrend = a.avgTrend3M == null ? null
+    : clamp10(band(a.avgTrend3M, [[-1, 1.5], [-0.25, 3], [-0.10, 4.5], [0, 5.5], [0.10, 7], [0.25, 8.8]]));
+  const sRegime = a.regime == null ? null
+    : a.regime === 'Risk-On' ? 7.5 : a.regime === 'Risk-Off' ? 3.5 : 5.5;
+
+  const { value, coverage } = weighted([
+    [sRotation, W.sectorRotation], [sRs, W.relativeStrength],
+    [sTrend, W.trendMomentum], [sRegime, W.marketRegime],
+  ]);
+  if (coverage === 0) return null;
+
+  const score = clamp10(value);
+  return {
+    score,
+    label: labelFor(score, ALIGNMENT_BANDS),
+    components: [
+      { label: 'Sector rotation',   score: sRotation ?? 5, weight: W.sectorRotation,
+        detail: a.avgSectorPressure == null ? 'unavailable' : `weighted pressure ${a.avgSectorPressure >= 0 ? '+' : ''}${a.avgSectorPressure.toFixed(0)}` },
+      { label: 'Relative strength', score: sRs ?? 5, weight: W.relativeStrength,
+        detail: a.avgRs == null ? 'unavailable' : `${pctDec(a.avgRs)} vs sectors` },
+      { label: 'Trend / momentum',  score: sTrend ?? 5, weight: W.trendMomentum,
+        detail: a.avgTrend3M == null ? 'unavailable' : `${pctDec(a.avgTrend3M)} over 3M` },
+      { label: 'Market regime',     score: sRegime ?? 5, weight: W.marketRegime,
+        detail: a.regime ?? 'unavailable' },
+    ],
+    notes: a.sectorNotes,
+  };
 }
 
 // ── Alerts ───────────────────────────────────────────────────────────────────
 
-export function buildAlerts(reviews: PositionReview[], combinedExposure: Map<string, number>): string[] {
+export function buildAlerts(
+  reviews: PositionReview[],
+  combinedExposure: Map<string, number>,
+  representativeTicker?: Map<string, string>,
+  growthEtfPct = 0,
+): string[] {
   const out: string[] = [];
+  const totalValue = reviews.reduce((s, r) => s + r.marketValueNative, 0) || 1;
+  const valueShare = (s: ReviewStatus) =>
+    reviews.filter(r => r.status === s).reduce((sum, r) => sum + r.marketValueNative, 0) / totalValue * 100;
   const count = (s: ReviewStatus) => reviews.filter(r => r.status === s).length;
 
+  // Overweight is judged against the tolerance for what the holding IS —
+  // a broad diversified core fund is never "overweight" at a normal core size.
+  const overweight = [...combinedExposure.entries()]
+    .filter(([base, pct]) => isOverweightExposure(representativeTicker?.get(base) ?? base, pct))
+    .sort((a, b) => b[1] - a[1]);
+  for (const [base, pct] of overweight.slice(0, 3)) {
+    out.push(`${base} combined exposure ${pct.toFixed(1)}% — OVERWEIGHT`);
+  }
+
+  const exit = count('EXIT');
   const review = count('REVIEW');
   const watch = count('WATCH');
   const trim = count('TRIM');
-  const exit = count('EXIT');
 
   if (exit > 0)   out.push(`${exit} holding${exit > 1 ? 's' : ''} marked thesis-broken`);
-  if (review > 0) out.push(`${review} holding${review > 1 ? 's' : ''} require high-priority review`);
+  if (review > 0) out.push(`${review} holding${review > 1 ? 's' : ''} require high-priority review (${valueShare('REVIEW').toFixed(1)}% of value)`);
   if (watch > 0)  out.push(`${watch} holding${watch > 1 ? 's' : ''} on watch`);
   if (trim > 0)   out.push(`${trim} holding${trim > 1 ? 's' : ''} suggest trimming`);
 
-  const overweight = [...combinedExposure.entries()]
-    .filter(([, pct]) => pct >= EXPOSURE_THRESHOLDS.overweight)
-    .sort((a, b) => b[1] - a[1]);
-  for (const [base, pct] of overweight.slice(0, 3)) {
-    out.push(`${base} is overweight at ${pct.toFixed(1)}% combined exposure`);
+  if (growthEtfPct >= CONCENTRATION_BY_TYPE.growthEtf.high) {
+    out.push(`Growth / Nasdaq ETF overlap elevated (${growthEtfPct.toFixed(1)}%)`);
   }
 
   return out;

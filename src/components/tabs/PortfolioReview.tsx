@@ -17,11 +17,12 @@ import { loadReviewFlags, setThesisBroken } from '../../lib/review/reviewFlags';
 import { computePortfolioYtd } from '../../lib/review/portfolioReturn';
 import {
   computeCompanyQuality, computeEtfRole, computePositionFit, deriveStatus, buildAction,
-  computePortfolioHealth, buildAlerts, sectorLabelFor, isBroadEtf, isGrowthEtf, positionTypeFor,
+  computePortfolioHealth, computeMarketAlignment, buildAlerts, sectorLabelFor,
+  isBroadEtf, isGrowthEtf, positionTypeFor,
 } from '../../lib/review/reviewEngine';
 import type { PositionReview, CompanyQuality } from '../../lib/review/reviewEngine';
 import {
-  REVIEW_STATUS_STYLE, PORTFOLIO_HEALTH_HELP, COMPANY_QUALITY_HELP,
+  REVIEW_STATUS_STYLE, PORTFOLIO_HEALTH_HELP, MARKET_ALIGNMENT_HELP, COMPANY_QUALITY_HELP,
   POSITION_FIT_HELP, PORTFOLIO_YTD_HELP, EXPOSURE_THRESHOLDS,
 } from '../../config/reviewConfig';
 import { SECTOR_NAME_BY_ETF } from '../../config/portfolioConfig';
@@ -75,6 +76,7 @@ function ScoreBar({ score, tone = 'blue' }: { score: number; tone?: 'blue' | 'vi
 interface ReviewResult {
   reviews: PositionReview[];
   health: ReturnType<typeof computePortfolioHealth>;
+  alignment: ReturnType<typeof computeMarketAlignment>;
   alerts: string[];
   totalPnLCAD: number;
   totalCostCAD: number;
@@ -252,25 +254,60 @@ export default function PortfolioReview() {
       const totalPnLCAD = totalCAD - totalCostCAD;
 
       const sectorsPresent = new Set(reviews.filter(r => r.sectorEtf).map(r => r.sectorEtf!));
-      const broadPct = reviews.filter(r => isBroadEtf(r.ticker)).reduce((s, r) => s + r.positionPct, 0);
-      const rsValues = reviews.map(r => r.rsVsSector1M).filter((x): x is number => x != null);
-      const pressureWeighted = reviews.filter(r => r.sector);
-      const avgPressure = pressureWeighted.length > 0
-        ? pressureWeighted.reduce((s, r) => s + r.sector!.pressure * r.positionPct, 0) /
-          (pressureWeighted.reduce((s, r) => s + r.positionPct, 0) || 1)
+      const broadPct  = reviews.filter(r => isBroadEtf(r.ticker)).reduce((s, r) => s + r.positionPct, 0);
+      const growthPct = reviews.filter(r => isGrowthEtf(r.ticker)).reduce((s, r) => s + r.positionPct, 0);
+
+      // Value-weighted tactical inputs
+      const rsRows = reviews.filter(r => r.rsVsSector1M != null);
+      const avgRs = rsRows.length > 0
+        ? rsRows.reduce((s, r) => s + r.rsVsSector1M! * r.positionPct, 0) / (rsRows.reduce((s, r) => s + r.positionPct, 0) || 1)
+        : null;
+      const trendRows = reviews.filter(r => r.ret3M != null);
+      const avgTrend3M = trendRows.length > 0
+        ? trendRows.reduce((s, r) => s + r.ret3M! * r.positionPct, 0) / (trendRows.reduce((s, r) => s + r.positionPct, 0) || 1)
+        : null;
+      const pressureRows = reviews.filter(r => r.sector);
+      const avgPressure = pressureRows.length > 0
+        ? pressureRows.reduce((s, r) => s + r.sector!.pressure * r.positionPct, 0) /
+          (pressureRows.reduce((s, r) => s + r.positionPct, 0) || 1)
         : null;
 
+      // Largest sector weight (diversified/specialty funds are not a sector)
+      const sectorTotals = new Map<string, number>();
+      for (const r of reviews) {
+        if (!r.sectorEtf) continue;
+        sectorTotals.set(r.sectorLabel, (sectorTotals.get(r.sectorLabel) ?? 0) + r.positionPct);
+      }
+      const largestSectorPct = Math.max(0, ...sectorTotals.values());
+
+      // base ticker → a representative real ticker, so concentration rules can
+      // tell a broad core fund apart from a single company
+      const representativeTicker = new Map<string, string>();
+      for (const r of rows) if (!representativeTicker.has(r.base)) representativeTicker.set(r.base, r.h.ticker);
+
       const health = computePortfolioHealth({
-        reviews,
-        largestCombinedExposurePct: Math.max(...combinedExposure.values(), 0),
+        reviews, combinedExposure, representativeTicker,
         distinctSectors: sectorsPresent.size,
+        largestSectorPct,
         broadEtfPct: broadPct,
-        avgRs: rsValues.length > 0 ? rsValues.reduce((s, x) => s + x, 0) / rsValues.length : null,
-        avgSectorPressure: avgPressure,
-        worstDrawdownPct: Math.min(...reviews.map(r => r.pnlPct ?? 0), 0),
+        growthEtfPct: growthPct,
+        avgRs, avgSectorPressure: avgPressure,
       });
 
-      const alerts = buildAlerts(reviews, combinedExposure);
+      const sectorNotes = [...sectorTotals.entries()]
+        .sort((a, b) => b[1] - a[1]).slice(0, 3)
+        .map(([label]) => {
+          const m = reviews.find(r => r.sectorLabel === label)?.sector;
+          return m ? `${label}: pressure ${signedInt(m.pressure)} ${m.classification.toLowerCase()}` : null;
+        })
+        .filter((x): x is string => x != null);
+
+      const alignment = computeMarketAlignment({
+        avgSectorPressure: avgPressure, avgRs, avgTrend3M,
+        regime: null, sectorNotes,
+      });
+
+      const alerts = buildAlerts(reviews, combinedExposure, representativeTicker, growthPct);
 
       // Same-period benchmark comparison
       const ytd = computePortfolioYtd(rows.map(r => ({
@@ -299,7 +336,7 @@ export default function PortfolioReview() {
       }, 0);
 
       setResult({
-        reviews, health, alerts, totalPnLCAD, totalCostCAD, ytd, benchmarks,
+        reviews, health, alignment, alerts, totalPnLCAD, totalCostCAD, ytd, benchmarks,
         annualDividendsCAD, uniqueUnderlying: combinedExposure.size,
         generatedAt: new Date().toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' }),
       });
@@ -377,13 +414,29 @@ export default function PortfolioReview() {
               {result.health ? (
                 <>
                   <div className={`text-2xl font-bold ${
-                    result.health.score >= 8 ? 'text-emerald-400' : result.health.score >= 6.5 ? 'text-blue-400'
-                    : result.health.score >= 5 ? 'text-amber-400' : 'text-orange-400'}`}>
+                    result.health.score >= 8.5 ? 'text-emerald-400' : result.health.score >= 7 ? 'text-emerald-500'
+                    : result.health.score >= 5.5 ? 'text-amber-400' : result.health.score >= 4 ? 'text-orange-400' : 'text-red-400'}`}>
                     {result.health.label}
                   </div>
                   <div className="mt-2"><ScoreBar score={result.health.score} /></div>
+                  <div className="text-xs text-zinc-600 mt-1">structural quality</div>
+                  {result.alignment && (
+                    <div className="mt-2 pt-2 border-t border-zinc-800">
+                      <div className="text-xs text-zinc-500 flex items-center gap-1">
+                        Market Alignment <InfoTip text={MARKET_ALIGNMENT_HELP} />
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className={`text-sm font-semibold ${
+                          result.alignment.score >= 6.5 ? 'text-emerald-400'
+                          : result.alignment.score >= 4.5 ? 'text-amber-400' : 'text-red-400'}`}>
+                          {result.alignment.score.toFixed(1)}
+                        </span>
+                        <span className="text-xs text-zinc-500">{result.alignment.label}</span>
+                      </div>
+                    </div>
+                  )}
                   <button onClick={() => setShowHealth(v => !v)}
-                    className="text-xs text-zinc-500 hover:text-zinc-300 mt-1 underline underline-offset-2 decoration-dotted">
+                    className="text-xs text-zinc-500 hover:text-zinc-300 mt-2 underline underline-offset-2 decoration-dotted">
                     {showHealth ? 'Hide' : 'Show'} breakdown
                   </button>
                 </>
@@ -431,20 +484,74 @@ export default function PortfolioReview() {
 
           {/* Health breakdown */}
           {showHealth && result.health && (
-            <div className="card">
-              <div className="text-sm font-semibold text-zinc-100 mb-3">
-                Portfolio Health {result.health.score.toFixed(1)} / 10 — components
-              </div>
-              <div className="space-y-2">
-                {result.health.components.map(c => (
-                  <div key={c.key} className="flex items-center gap-3 text-xs">
-                    <span className="text-zinc-300 w-52 flex-shrink-0">{c.label}</span>
-                    <span className="text-zinc-600 w-12 text-right tabular-nums">{c.weight}%</span>
-                    <div className="flex-1 max-w-xs"><ScoreBar score={c.score} /></div>
-                    <span className="text-zinc-500 flex-1">{c.detail}</span>
+            <div className="card space-y-4">
+              <div>
+                <div className="text-sm font-semibold text-zinc-100 mb-1">
+                  Portfolio Health {result.health.score.toFixed(1)} / 10 — {result.health.label}
+                </div>
+                <div className="text-xs text-zinc-600 mb-3">
+                  Structural measure. Tactical factors carry 10% combined; benchmark performance is excluded entirely.
+                </div>
+                <div className="space-y-2">
+                  {result.health.components.map(c => (
+                    <div key={c.key} className="flex items-center gap-3 text-xs">
+                      <span className="text-zinc-300 w-48 flex-shrink-0">{c.label}</span>
+                      <span className="text-zinc-400 w-10 text-right tabular-nums font-medium">{c.score.toFixed(1)}</span>
+                      <span className="text-zinc-600 w-10 text-right tabular-nums">×{c.weight}%</span>
+                      <div className="w-28"><ScoreBar score={c.score} /></div>
+                      <span className="text-zinc-500 flex-1">{c.detail}</span>
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-3 text-xs pt-2 border-t border-zinc-800">
+                    <span className="text-zinc-200 font-semibold w-48">Final</span>
+                    <span className="text-zinc-100 w-10 text-right tabular-nums font-bold">{result.health.score.toFixed(1)}</span>
+                    <span className="w-10" />
+                    <span className="text-zinc-600">{result.health.label}</span>
                   </div>
-                ))}
+                </div>
               </div>
+
+              <div className="grid sm:grid-cols-2 gap-4 pt-1">
+                <div>
+                  <div className="text-xs font-medium text-orange-400 mb-1.5">Primary Risks</div>
+                  {result.health.risks.length === 0
+                    ? <div className="text-xs text-zinc-600">No material structural risks detected</div>
+                    : <ul className="space-y-0.5">{result.health.risks.map((r, i) => (
+                        <li key={i} className="text-xs text-zinc-400">• {r}</li>))}</ul>}
+                </div>
+                <div>
+                  <div className="text-xs font-medium text-emerald-400 mb-1.5">Positive Factors</div>
+                  {result.health.positives.length === 0
+                    ? <div className="text-xs text-zinc-600">—</div>
+                    : <ul className="space-y-0.5">{result.health.positives.map((p, i) => (
+                        <li key={i} className="text-xs text-zinc-400">• {p}</li>))}</ul>}
+                </div>
+              </div>
+
+              {result.alignment && (
+                <div className="pt-3 border-t border-zinc-800">
+                  <div className="text-sm font-semibold text-zinc-100 mb-1">
+                    Market Alignment {result.alignment.score.toFixed(1)} / 10 — {result.alignment.label}
+                  </div>
+                  <div className="text-xs text-zinc-600 mb-2">
+                    Tactical read on current conditions. Can change quickly without implying the portfolio is unhealthy.
+                  </div>
+                  <div className="space-y-1.5">
+                    {result.alignment.components.map(c => (
+                      <div key={c.label} className="flex items-center gap-3 text-xs">
+                        <span className="text-zinc-300 w-48 flex-shrink-0">{c.label}</span>
+                        <span className="text-zinc-400 w-10 text-right tabular-nums font-medium">{c.score.toFixed(1)}</span>
+                        <span className="text-zinc-600 w-10 text-right tabular-nums">×{c.weight}%</span>
+                        <div className="w-28"><ScoreBar score={c.score} /></div>
+                        <span className="text-zinc-500 flex-1">{c.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {result.alignment.notes.length > 0 && (
+                    <div className="mt-2 text-xs text-zinc-500">{result.alignment.notes.join(' · ')}</div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
