@@ -8,6 +8,7 @@ import {
   ResponsiveContainer, Label,
 } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
+import { consumePendingSector } from '../../lib/navigation';
 import FundamentalsDrawer from '../FundamentalsDrawer';
 import {
   fetchAllHistories, fetchConstituentQuotes, fetchConstituentHistories,
@@ -204,6 +205,12 @@ export default function SectorRotation() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Sector requested from another tab (e.g. Watch List sector link)
+  useEffect(() => {
+    const pending = consumePendingSector();
+    if (pending) setSelectedEtf(pending);
+  }, []);
 
   const regime = useMemo(() => computeRegime(metrics), [metrics]);
   const opportunities = useMemo(() => computeOpportunities(metrics, quotes, conHists), [metrics, quotes, conHists]);

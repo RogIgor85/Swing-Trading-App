@@ -1,5 +1,6 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { Upload, X, TrendingUp, TrendingDown, Minus, AlertTriangle, CheckCircle, Loader } from 'lucide-react';
+import { consumePendingChartTicker } from '../../lib/navigation';
 
 interface ChartAnalysis {
   verdict: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
@@ -60,8 +61,15 @@ export default function ChartAnalysis() {
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult]       = useState<ChartAnalysis | null>(null);
   const [error, setError]         = useState<string | null>(null);
+  const [symbol, setSymbol]       = useState('');
   const fileRef                   = useRef<HTMLInputElement>(null);
   const dropRef                   = useRef<HTMLDivElement>(null);
+
+  // Ticker handed over from another tab (e.g. Watch List "Chart" button)
+  useEffect(() => {
+    const pending = consumePendingChartTicker();
+    if (pending) setSymbol(pending);
+  }, []);
 
   function loadFile(file: File) {
     setResult(null);
@@ -114,7 +122,7 @@ export default function ChartAnalysis() {
       const res = await fetch('/api/analyze-chart', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image, mediaType }),
+        body: JSON.stringify({ image, mediaType, ticker: symbol.trim().toUpperCase() || undefined }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -138,6 +146,24 @@ export default function ChartAnalysis() {
           Upload, drag & drop, or <kbd className="bg-zinc-700 px-1 rounded text-zinc-300">Ctrl+V</kbd> paste a chart screenshot.
           Claude will assess the setup and tell you if it's bullish or bearish.
         </p>
+
+        {/* Optional ticker context — pre-filled when arriving from another tab */}
+        <div className="flex items-end gap-3 mb-4">
+          <div className="w-40">
+            <label className="label">Ticker (optional)</label>
+            <input
+              className="input-base uppercase"
+              placeholder="AMZN"
+              value={symbol}
+              onChange={(e) => setSymbol(e.target.value)}
+            />
+          </div>
+          {symbol && (
+            <span className="text-xs text-zinc-500 pb-2">
+              Analyzing chart for <span className="font-mono text-blue-400">{symbol.toUpperCase()}</span>
+            </span>
+          )}
+        </div>
 
         {!preview ? (
           <div

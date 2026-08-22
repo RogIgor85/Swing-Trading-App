@@ -42,8 +42,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
 
-  const { image, mediaType } = req.body as { image: string; mediaType: string };
+  const { image, mediaType, ticker } = req.body as { image: string; mediaType: string; ticker?: string };
   if (!image) return res.status(400).json({ error: 'image required (base64)' });
+
+  const safeTicker = typeof ticker === 'string' ? ticker.replace(/[^A-Za-z0-9.\-]/g, '').slice(0, 12) : '';
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -71,7 +73,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
               },
               {
                 type: 'text',
-                text: 'Analyze this chart and give me your full technical assessment.',
+                text: safeTicker
+                  ? `This chart is for ${safeTicker}. Analyze it and give me your full technical assessment.`
+                  : 'Analyze this chart and give me your full technical assessment.',
               },
             ],
           },

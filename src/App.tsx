@@ -59,6 +59,19 @@ export default function App() {
     }
   }
 
+  // Cross-tab navigation (Watch List → Chart Analysis / Sector Rotation)
+  useEffect(() => {
+    function onNavigate(e: Event) {
+      const tab = (e as CustomEvent<{ tab: TabId }>).detail?.tab;
+      if (tab && TABS.some(t => t.id === tab)) {
+        setActiveTab(tab);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
+    window.addEventListener('swing:navigate', onNavigate);
+    return () => window.removeEventListener('swing:navigate', onNavigate);
+  }, []);
+
   useEffect(() => {
     if (!supabase) { setUser(null); return; }
 
