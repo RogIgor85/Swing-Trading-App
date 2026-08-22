@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  computeCompanyQuality, computeEtfRole, computePositionFit, deriveStatus,
+  computeCompanyQuality, computeEtfQuality, computeEtfPositionFit, computeEtfOverlap, etfRoleOf, computePositionFit, deriveStatus,
   buildAction, computePortfolioHealth, computeMarketAlignment, buildAlerts,
   isOverweightExposure, sectorLabelFor, isBroadEtf, isGrowthEtf, positionTypeFor,
 } from './reviewEngine';
@@ -256,25 +256,97 @@ describe('sector mapping and ETF classification', () => {
     expect(positionTypeFor('MSFT')).toBe('Individual Stock');
   });
 
-  it('scores a broad ETF on role, never on company fundamentals', () => {
-    const q = computeEtfRole('XEQT.TO', 0);
+  it('scores a broad ETF on product factors, never on company fundamentals', () => {
+    const q = computeEtfQuality('XEQT.TO');
     expect(q.kind).toBe('etf');
     expect(q.score).toBeGreaterThan(8);
-    const labels = q.components.map(c => c.label.toLowerCase()).join(' ');
+    const labels = q.components.map((c: { label: string }) => c.label.toLowerCase()).join(' ');
     expect(labels).not.toMatch(/revenue|eps|gross margin|return on equity/);
+    expect(labels).toMatch(/mandate|liquidity|cost|tracking|issuer/);
   });
 
-  it('does not describe a Nasdaq fund as broadly diversified', () => {
-    const q = computeEtfRole('QQC.TO', 40);
-    expect(q.score).toBeLessThan(computeEtfRole('XEQT.TO', 0).score);
+  it('rates a Nasdaq fund as a high-quality PRODUCT despite being concentrated', () => {
+    const q = computeEtfQuality('QQC.TO');
+    // Concentration in mega-cap growth is its mandate, not a product defect
+    expect(q.score).toBeGreaterThan(7.5);
     const text = [...q.pros, ...q.cons].join(' ').toLowerCase();
-    expect(text).toMatch(/concentrated in large-cap growth/);
-    expect(text).not.toMatch(/hundreds of stocks/);
-    expect(text).toMatch(/overlap/);
+    expect(text).toMatch(/rules-based|mandate|designed to provide/);
+  });
+
+  it('does not reduce ETF Quality for portfolio overlap', () => {
+    // Quality takes no portfolio input at all — same call, same score
+    expect(computeEtfQuality('QQC.TO').score).toBe(computeEtfQuality('QQC.TO').score);
+    const params = computeEtfQuality.length;
+    expect(params).toBe(1);   // ticker only; no overlap argument exists
+  });
+
+  it('measures overlap from real index weights, for Position Fit only', () => {
+    const held = new Set(['MSFT', 'META', 'NFLX', 'AAPL', 'NVDA']);
+    const overlap = computeEtfOverlap('QQC.TO', held)!;
+    expect(overlap).toBeGreaterThan(25);        // these are heavy NDX weights
+    expect(overlap).toBeLessThanOrEqual(100);
+    expect(computeEtfOverlap('QQC.TO', new Set())).toBe(0);
+  });
+
+  it('gives QQC high quality but lower fit when overlap is heavy', () => {
+    const q = computeEtfQuality('QQC.TO');
+    const held = new Set(['MSFT', 'META', 'NFLX', 'AAPL', 'NVDA', 'AMZN', 'TSLA']);
+    const fit = computeEtfPositionFit({
+      ticker: 'QQC.TO', overlapPct: computeEtfOverlap('QQC.TO', held),
+      positionPct: 10.4, styleExposurePct: 55, correlation: null,
+      ret3M: 0.02, sectorPressure: -17,
+    });
+    expect(q.score).toBeGreaterThan(fit.score);   // good product, moderate fit
+    expect(fit.score).toBeGreaterThan(3);
+  });
+
+  it('labels fund roles without implying satellite is inferior', () => {
+    expect(etfRoleOf('XEQT.TO')).toBe('CORE');
+    expect(etfRoleOf('QQC.TO')).toBe('SATELLITE');
+    expect(etfRoleOf('XLK')).toBe('SECTOR');
+    expect(etfRoleOf('MSFT')).toBeNull();
+  });
+
+  it('does not size-penalize a core fund but does a satellite', () => {
+    const core = computeEtfPositionFit({ ticker: 'XEQT.TO', overlapPct: 5, positionPct: 32, styleExposurePct: null, correlation: null, ret3M: 0.05, sectorPressure: null });
+    const sat  = computeEtfPositionFit({ ticker: 'QQC.TO', overlapPct: 5, positionPct: 32, styleExposurePct: null, correlation: null, ret3M: 0.05, sectorPressure: null });
+    const coreSize = core.components.find(c => c.label === 'Position size')!.score;
+    const satSize  = sat.components.find(c => c.label === 'Position size')!.score;
+    expect(coreSize).toBeGreaterThan(satSize);
+  });
+
+  it('does not put an ETF on WATCH for a small drawdown', () => {
+    const q = computeEtfQuality('QQC.TO');
+    const s = deriveStatus({ fit: 5.7, quality: q, combinedExposurePct: 10.4, pnlPct: -2.4, rsVsSector1M: null, isEtf: true, isBroadEtf: false, thesisBroken: false });
+    expect(s.status).toBe('HOLD');
+  });
+
+  it('uses ETF language with no earnings reference', () => {
+    const q = computeEtfQuality('QQC.TO');
+    for (const status of ['HOLD', 'WATCH', 'REVIEW'] as const) {
+      const a = buildAction({
+        status, flags: [], companyName: 'QQC', quality: q, combinedExposurePct: 10.4,
+        siblingCount: 1, pnlPct: -2.4, rsVsSector1M: null, sectorLabel: 'Growth / Nasdaq ETF',
+        sectorPressure: -17, isBroadEtf: false, isGrowthEtf: true, overlapPct: 40,
+      });
+      expect(a).not.toMatch(/earnings/i);
+      expect(a).toMatch(/index exposure|fund quality|portfolio-level/i);
+    }
+  });
+
+  it('uses plan language for a broad core fund', () => {
+    const q = computeEtfQuality('XEQT.TO');
+    const a = buildAction({
+      status: 'CORE', flags: [], companyName: 'XEQT', quality: q, combinedExposurePct: 32,
+      siblingCount: 1, pnlPct: -1, rsVsSector1M: null, sectorLabel: 'Diversified ETF',
+      sectorPressure: null, isBroadEtf: true, isGrowthEtf: false,
+    });
+    expect(a).toMatch(/portfolio plan/i);
+    expect(a).not.toMatch(/earnings/i);
   });
 
   it('a broad ETF gets CORE status regardless of size', () => {
-    const q = computeEtfRole('XEQT.TO', 0);
+    const q = computeEtfQuality('XEQT.TO');
     const s = deriveStatus({ fit: 6, quality: q, combinedExposurePct: 32, pnlPct: 1, rsVsSector1M: null, isEtf: true, isBroadEtf: true, thesisBroken: false });
     expect(s.status).toBe('CORE');
     expect(s.flags).not.toContain('OVERWEIGHT');
@@ -304,12 +376,12 @@ describe('portfolio health', () => {
 
   /** Portfolio resembling the reported one: quality ~8, fit ~7, 32% XEQT, MSFT 26.5%. */
   function realisticInput(over: Partial<Parameters<typeof computePortfolioHealth>[0]> = {}) {
-    const etfQuality = computeEtfRole('XEQT.TO', 0);
+    const etfQuality = computeEtfQuality('XEQT.TO');
     const reviews = [
       review({ ticker: 'XEQT.TO', base: 'XEQT', companyQuality: etfQuality, positionFit: 8.5, marketValueNative: 3200, positionPct: 32, status: 'CORE', isEtf: true }),
       review({ ticker: 'MSFT', base: 'MSFT', positionFit: 7.2, marketValueNative: 1300, positionPct: 13 }),
       review({ ticker: 'MSFT.TO', base: 'MSFT', positionFit: 6.9, marketValueNative: 1350, positionPct: 13.5 }),
-      review({ ticker: 'QQC.TO', base: 'QQC', companyQuality: computeEtfRole('QQC.TO', 36), positionFit: 6.5, marketValueNative: 1040, positionPct: 10.4, isEtf: true }),
+      review({ ticker: 'QQC.TO', base: 'QQC', companyQuality: computeEtfQuality('QQC.TO'), positionFit: 6.5, marketValueNative: 1040, positionPct: 10.4, isEtf: true }),
       review({ ticker: 'META', base: 'META', positionFit: 7.4, marketValueNative: 900, positionPct: 9 }),
       review({ ticker: 'ORCL', base: 'ORCL', positionFit: 4.2, marketValueNative: 430, positionPct: 4.3, status: 'REVIEW', pnlPct: -30 }),
       review({ ticker: 'TSLA', base: 'TSLA', positionFit: 4.0, marketValueNative: 380, positionPct: 3.8, status: 'REVIEW', pnlPct: -44 }),

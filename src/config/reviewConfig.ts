@@ -27,12 +27,40 @@ export const COMPANY_QUALITY_WEIGHTS = {
   valuation:     12,   // P/E, mild influence only
 };
 
-/** ETF Quality / Portfolio Role (0–10) — replaces company fundamentals. */
-export const ETF_ROLE_WEIGHTS = {
-  diversification: 40,  // broad > growth-index > sector
-  portfolioRole:   30,  // suitability as a core/satellite position
-  concentration:   20,  // internal concentration & overlap with direct holdings
-  liquidity:       10,
+/**
+ * ETF Quality (0–10) — how well the PRODUCT delivers its own stated mandate.
+ * Deliberately contains no portfolio-specific input: overlap, position size and
+ * style concentration relative to your holdings belong to Position Fit.
+ * A Nasdaq-100 fund is not a poor product for being concentrated in mega-cap
+ * growth — that is the exposure it exists to provide.
+ */
+export const ETF_QUALITY_WEIGHTS = {
+  mandateQuality:          25,  // index/strategy soundness and rules-based consistency
+  liquidityStability:      20,  // fund scale and tradability
+  cost:                    15,  // expense ratio versus peers of the same type
+  tracking:                15,  // implementation quality
+  diversificationInMandate: 15, // breadth WITHIN the mandate, not against XEQT
+  issuerStructure:         10,
+};
+
+/** ETF Position Fit (0–10) — does owning it make sense in THIS portfolio? */
+export const ETF_POSITION_FIT_WEIGHTS = {
+  portfolioRole:       20,
+  overlap:             25,
+  positionSize:        15,
+  styleConcentration:  15,
+  correlation:         10,
+  trend:               10,
+  marketAlignment:      5,
+};
+
+/** Expense-ratio expectations differ sharply by fund type (%). */
+export const EXPENSE_BENCHMARKS = {
+  'Broad-Market ETF': { excellent: 0.10, good: 0.25, fair: 0.45 },
+  'Growth/Index ETF': { excellent: 0.15, good: 0.35, fair: 0.55 },
+  'Sector ETF':       { excellent: 0.12, good: 0.30, fair: 0.60 },
+  'Specialty ETF':    { excellent: 0.25, good: 0.55, fair: 0.90 },
+  'Other':            { excellent: 0.20, good: 0.45, fair: 0.75 },
 };
 
 /** Position Fit (0–10) — this specific holding in this account. */

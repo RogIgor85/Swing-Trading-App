@@ -12,14 +12,15 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
-  COMPANY_QUALITY_WEIGHTS, ETF_ROLE_WEIGHTS, POSITION_FIT_WEIGHTS,
+  COMPANY_QUALITY_WEIGHTS, ETF_QUALITY_WEIGHTS, ETF_POSITION_FIT_WEIGHTS,
+  EXPENSE_BENCHMARKS, POSITION_FIT_WEIGHTS,
   PORTFOLIO_HEALTH_WEIGHTS, EXPOSURE_THRESHOLDS, DRAWDOWN_THRESHOLDS,
   RELATIVE_STRENGTH_THRESHOLDS, FIT_BANDS, MARKET_ALIGNMENT_WEIGHTS,
   HEALTH_BANDS, ALIGNMENT_BANDS, CONCENTRATION_BY_TYPE, HEALTH_COMPONENT_LABELS,
 } from '../../config/reviewConfig';
 import type { ReviewStatus } from '../../config/reviewConfig';
 import { ETF_REGISTRY, SECTOR_NAME_BY_ETF, DIVERSIFIED_LABEL, GROWTH_ETF_LABEL } from '../../config/portfolioConfig';
-import type { PositionType } from '../../config/portfolioConfig';
+import type { PositionType, EtfRole } from '../../config/portfolioConfig';
 import type { Holding, FinnhubMetrics } from '../../types';
 import type { SectorMetrics } from '../sector/sectorEngine';
 
@@ -171,52 +172,161 @@ export function computeCompanyQuality(m: Metric): CompanyQuality {
 
 // ── ETF Quality / Portfolio Role (fundamentals do not apply) ─────────────────
 
-export function computeEtfRole(ticker: string, overlapPct: number): CompanyQuality {
-  const W = ETF_ROLE_WEIGHTS;
+/**
+ * ETF Quality — measures the PRODUCT only: does it deliver its own mandate
+ * efficiently? Takes no portfolio input, so overlap with your other holdings
+ * can never reduce it. Missing facts are dropped and weights renormalized.
+ */
+export function computeEtfQuality(ticker: string): CompanyQuality {
+  const W = ETF_QUALITY_WEIGHTS;
   const def = ETF_REGISTRY[ticker.toUpperCase()];
   const type: PositionType = def?.type ?? 'Other';
   const pros: string[] = [];
   const cons: string[] = [];
 
-  let sDiv: number, sRole: number, sConc: number;
-  const sLiq = 9; // all registry funds are large and liquid
+  // Mandate / index quality — judged against the fund's OWN stated mandate
+  const sMandate =
+    type === 'Broad-Market ETF' ? 9.3
+    : type === 'Growth/Index ETF' ? 8.8   // a major rules-based index is a sound mandate
+    : type === 'Sector ETF' ? 8.2
+    : 6.5;
 
-  if (type === 'Broad-Market ETF') {
-    sDiv = 9.5; sRole = 9.5; sConc = 9;
-    pros.push('Broadly diversified across sectors and regions — suitable as a core holding');
-    pros.push(`${def?.note ?? 'Index fund'} — single-stock risk is genuinely diluted`);
-  } else if (type === 'Growth/Index ETF') {
-    sDiv = 5.5; sRole = 6.5; sConc = 4.5;
-    pros.push(`${def?.note ?? 'Index fund'} — rules-based exposure, no single-name selection risk`);
-    cons.push('Concentrated in large-cap growth/technology — not a substitute for a broad-market fund');
-    cons.push('Top holdings dominate performance; sector and style risk are meaningful');
-    if (overlapPct > 0) {
-      cons.push(`Overlaps roughly ${overlapPct.toFixed(0)}% of your direct holdings by name — true exposure is higher than the position size suggests`);
-      sConc -= Math.min(2, overlapPct / 25);
-    }
-  } else if (type === 'Sector ETF') {
-    sDiv = 4; sRole = 6; sConc = 4;
-    pros.push('Removes single-stock risk within its sector');
-    cons.push('Entire position rides one sector — a deliberate sector bet, not diversification');
-  } else {
-    sDiv = 5; sRole = 5.5; sConc = 5;
-    cons.push('Specialty fund — review its mandate and concentration before sizing up');
-  }
+  // Liquidity / fund stability
+  const sLiquidity = def?.aumTier === 'mega' ? 9.6 : def?.aumTier === 'large' ? 9.0
+    : def?.aumTier === 'mid' ? 7.8 : def?.aumTier === 'small' ? 6.0 : null;
+
+  // Cost — compared to peers of the SAME type, not across types
+  const bench = EXPENSE_BENCHMARKS[type as keyof typeof EXPENSE_BENCHMARKS] ?? EXPENSE_BENCHMARKS.Other;
+  const er = def?.expenseRatio ?? null;
+  const sCost = er == null ? null
+    : er <= bench.excellent ? 9.5
+    : er <= bench.good ? 8.0
+    : er <= bench.fair ? 6.0
+    : 4.0;
+
+  // Tracking / implementation — plain index replication tracks well
+  const sTracking = def?.indexName ? (type === 'Broad-Market ETF' ? 8.8 : 8.5) : null;
+
+  // Diversification WITHIN the mandate (100 names is broad for a Nasdaq-100 fund)
+  const n = def?.holdingsCount ?? null;
+  const sDivInMandate = n == null ? null
+    : type === 'Broad-Market ETF'
+      ? (n >= 3000 ? 9.5 : n >= 1000 ? 9.0 : n >= 500 ? 8.2 : 7.0)
+      : (n >= 200 ? 8.8 : n >= 100 ? 8.2 : n >= 50 ? 7.2 : 5.5);
+
+  const sIssuer = def?.issuer ? 9.0 : null;
 
   const { value, coverage } = weighted([
-    [sDiv, W.diversification], [sRole, W.portfolioRole],
-    [clamp10(sConc), W.concentration], [sLiq, W.liquidity],
+    [sMandate, W.mandateQuality],
+    [sLiquidity, W.liquidityStability],
+    [sCost, W.cost],
+    [sTracking, W.tracking],
+    [sDivInMandate, W.diversificationInMandate],
+    [sIssuer, W.issuerStructure],
   ]);
+
+  if (type === 'Broad-Market ETF') {
+    pros.push(`${def?.note ?? 'Index fund'} — broad diversification across sectors and regions`);
+  } else if (type === 'Growth/Index ETF') {
+    pros.push(`Tracks ${def?.indexName ?? 'a major index'} — rules-based, no single-name selection risk`);
+    pros.push(`${n ?? 'Many'} holdings within its mandate; concentration in mega-cap growth is the exposure it is designed to provide`);
+  } else if (type === 'Sector ETF') {
+    pros.push(`Tracks ${def?.indexName ?? 'its sector index'} — removes single-stock risk within the sector`);
+  }
+  if (er != null && er <= bench.good) pros.push(`Low cost for its category (MER ${er.toFixed(2)}%)`);
+  if (er != null && er > bench.fair) cons.push(`Expensive for its category (MER ${er.toFixed(2)}%)`);
+  if (def?.aumTier === 'small') cons.push('Smaller fund — check liquidity and spreads before sizing up');
 
   return {
     score: clamp10(value), isEtf: true, kind: 'etf',
     components: [
-      { label: 'Diversification', display: type === 'Broad-Market ETF' ? 'Broad' : type === 'Growth/Index ETF' ? 'Concentrated (large-cap growth)' : 'Single sector', score: sDiv },
-      { label: 'Portfolio role',  display: type === 'Broad-Market ETF' ? 'Core holding' : 'Satellite / tilt', score: sRole },
-      { label: 'Internal concentration', display: overlapPct > 0 ? `${overlapPct.toFixed(0)}% name overlap with direct holdings` : 'No measured overlap', score: clamp10(sConc) },
-      { label: 'Liquidity', display: 'High', score: sLiq },
+      { label: 'Mandate / index quality', display: def?.indexName ?? type, score: sMandate },
+      { label: 'Liquidity / stability',   display: def?.aumTier ? `${def.aumTier} fund` : 'N/A', score: sLiquidity },
+      { label: 'Cost (vs category)',      display: er == null ? 'N/A' : `MER ${er.toFixed(2)}%`, score: sCost },
+      { label: 'Tracking / implementation', display: def?.indexName ? 'Physical index replication' : 'N/A', score: sTracking },
+      { label: 'Diversification in mandate', display: n == null ? 'N/A' : `${n.toLocaleString()} holdings`, score: sDivInMandate },
+      { label: 'Issuer / structure',      display: def?.issuer ?? 'N/A', score: sIssuer },
     ],
     pros, cons, coverage,
+  };
+}
+
+/** Role label used to explain Position Fit for a fund. */
+export function etfRoleOf(ticker: string): EtfRole | null {
+  const def = ETF_REGISTRY[ticker.toUpperCase()];
+  if (!def) return null;
+  if (def.role) return def.role;
+  return def.type === 'Broad-Market ETF' ? 'CORE' : def.type === 'Sector ETF' ? 'SECTOR' : 'SATELLITE';
+}
+
+/**
+ * Real overlap: the share of the fund's index weight sitting in names you also
+ * hold directly. A Position Fit input only — never an ETF Quality input.
+ */
+export function computeEtfOverlap(ticker: string, directlyHeldBases: Set<string>): number | null {
+  const def = ETF_REGISTRY[ticker.toUpperCase()];
+  if (!def?.topHoldings) return null;
+  return def.topHoldings
+    .filter(([sym]) => directlyHeldBases.has(sym.toUpperCase()))
+    .reduce((s, [, w]) => s + w, 0);
+}
+
+export interface EtfFitInput {
+  ticker: string;
+  overlapPct: number | null;
+  positionPct: number;
+  /** portfolio weight of the style/sector the fund concentrates in */
+  styleExposurePct: number | null;
+  correlation: number | null;
+  ret3M: number | null;
+  sectorPressure: number | null;
+}
+
+export function computeEtfPositionFit(i: EtfFitInput): { score: number; components: FitComponent[] } {
+  const W = ETF_POSITION_FIT_WEIGHTS;
+  const role = etfRoleOf(i.ticker);
+  const type = positionTypeFor(i.ticker);
+
+  // A core fund earns its place structurally; a satellite must justify its size
+  const sRole = role === 'CORE' ? 9.3 : role === 'SATELLITE' ? 7.0 : role === 'SECTOR' ? 6.0 : 5.5;
+
+  const sOverlap = i.overlapPct == null ? null
+    : band(-i.overlapPct, [[-80, 2], [-60, 3], [-45, 4], [-30, 5.5], [-20, 6.8], [-10, 8], [-3, 9.3]]);
+
+  // Core funds are meant to be large; satellites are not
+  const sSize = type === 'Broad-Market ETF'
+    ? band(-i.positionPct, [[-90, 5], [-75, 7], [-60, 8.5], [-45, 9.3], [-20, 9]])
+    : band(-i.positionPct, [[-50, 1.5], [-35, 3], [-25, 4.5], [-18, 6], [-12, 7.5], [-6, 9]]);
+
+  const sStyle = i.styleExposurePct == null ? null
+    : band(-i.styleExposurePct, [[-80, 1.5], [-60, 3], [-45, 4.5], [-35, 6], [-25, 7.5], [-15, 9]]);
+
+  const sCorr = i.correlation == null ? null
+    : band(-i.correlation, [[-1, 2], [-0.9, 3.5], [-0.8, 5], [-0.65, 6.5], [-0.5, 8], [-0.3, 9]]);
+
+  const sTrend = i.ret3M == null ? null
+    : band(i.ret3M, [[-1, 2], [-0.25, 3.5], [-0.10, 5], [0, 6], [0.10, 7.5], [0.25, 9]]);
+
+  const sAlign = i.sectorPressure == null ? null
+    : band(i.sectorPressure, [[-100, 2.5], [-50, 4], [-22, 5], [-5, 5.5], [5, 6.5], [22, 8], [55, 9]]);
+
+  const { value } = weighted([
+    [sRole, W.portfolioRole], [sOverlap, W.overlap], [sSize, W.positionSize],
+    [sStyle, W.styleConcentration], [sCorr, W.correlation],
+    [sTrend, W.trend], [sAlign, W.marketAlignment],
+  ]);
+
+  return {
+    score: clamp10(value),
+    components: [
+      { label: 'Portfolio role',      display: role ?? 'n/a', score: sRole },
+      { label: 'Overlap with holdings', display: i.overlapPct == null ? 'N/A' : `${i.overlapPct.toFixed(0)}% of index weight`, score: sOverlap ?? 5 },
+      { label: 'Position size',       display: `${i.positionPct.toFixed(1)}%`, score: sSize },
+      { label: 'Style concentration', display: i.styleExposurePct == null ? 'N/A' : `${i.styleExposurePct.toFixed(1)}% portfolio`, score: sStyle ?? 5 },
+      { label: 'Correlation',         display: i.correlation == null ? 'N/A' : i.correlation.toFixed(2), score: sCorr ?? 5 },
+      { label: 'Trend (3M)',          display: pctDec(i.ret3M), score: sTrend ?? 5 },
+      { label: 'Market alignment',    display: i.sectorPressure == null ? 'N/A' : `${i.sectorPressure >= 0 ? '+' : ''}${i.sectorPressure}`, score: sAlign ?? 5 },
+    ],
   };
 }
 
@@ -314,6 +424,18 @@ export function deriveStatus(i: StatusInput): { status: ReviewStatus; flags: str
   // Broad-market funds are core holdings by construction.
   if (i.isBroadEtf) return { status: 'CORE', flags };
 
+  // Non-broad funds: a small drawdown is market noise, not a fund problem.
+  // Status follows portfolio-level reasons (overlap, size, sustained trend),
+  // never a modest negative P&L.
+  if (i.isEtf) {
+    const etfDrawdown = i.pnlPct ?? 0;
+    const materialDecline = etfDrawdown <= DRAWDOWN_THRESHOLDS.review;
+    if (i.fit >= FIT_BANDS.strongHold) return { status: 'STRONG HOLD', flags };
+    if (i.fit >= FIT_BANDS.hold)       return { status: 'HOLD', flags };
+    if (i.fit >= FIT_BANDS.watch)      return { status: materialDecline ? 'WATCH' : 'HOLD', flags };
+    return { status: materialDecline ? 'REVIEW' : 'WATCH', flags };
+  }
+
   const drawdown = i.pnlPct ?? 0;
   const severeDrawdown = drawdown <= D.review;
   const weakRs = (i.rsVsSector1M ?? 0) <= RELATIVE_STRENGTH_THRESHOLDS.weak;
@@ -352,12 +474,33 @@ export function buildAction(r: {
   sectorPressure: number | null;
   isBroadEtf: boolean;
   isGrowthEtf: boolean;
+  overlapPct?: number | null;
 }): string {
   const overweight = r.flags.includes('OVERWEIGHT');
   const elevated = r.flags.includes('HIGH EXPOSURE');
   const exposureNote = r.siblingCount > 1
     ? `combined ${r.companyName} exposure across accounts is ${r.combinedExposurePct.toFixed(1)}%`
     : `this position is ${r.combinedExposurePct.toFixed(1)}% of the portfolio`;
+
+  // ── ETF-specific language. Funds have no earnings report, so none of the
+  // company phrasing below applies to them. ──────────────────────────────────
+  if (r.isBroadEtf) {
+    return r.status === 'REVIEW'
+      ? 'Diversified core holding in a drawdown. Broad funds are expected to fall with the market — stay with your allocation plan unless your objectives or time horizon have changed.'
+      : 'Diversified core holding. Continue according to your portfolio plan unless the intended asset allocation changes.';
+  }
+  if (r.isGrowthEtf || r.quality.isEtf) {
+    const overlapNote = r.overlapPct != null && r.overlapPct >= 25
+      ? ` It overlaps roughly ${r.overlapPct.toFixed(0)}% of its index weight with names you already hold directly, so your true exposure to those companies is higher than the position size suggests.`
+      : '';
+    if (r.status === 'REVIEW') {
+      return `Fund quality is intact; the concern is portfolio-level.${overlapNote} Reassess how much of this style exposure you want rather than reacting to the drawdown.`;
+    }
+    if (r.status === 'WATCH' || r.status === 'TRIM') {
+      return `High-quality index exposure, but the fit in this portfolio is only moderate.${overlapNote} Maintain if the growth tilt is intentional; avoid increasing the position solely because of short-term weakness.`;
+    }
+    return `High-quality index exposure delivering its stated mandate.${overlapNote} Maintain as a satellite position sized to the tilt you actually want.`;
+  }
 
   switch (r.status) {
     case 'EXIT':

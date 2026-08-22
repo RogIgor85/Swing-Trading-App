@@ -16,7 +16,8 @@ import { loadSectorOverrides } from '../../lib/portfolio/sectorOverrides';
 import { loadReviewFlags, setThesisBroken } from '../../lib/review/reviewFlags';
 import { computePortfolioYtd } from '../../lib/review/portfolioReturn';
 import {
-  computeCompanyQuality, computeEtfRole, computePositionFit, deriveStatus, buildAction,
+  computeCompanyQuality, computeEtfQuality, computeEtfPositionFit, computeEtfOverlap,
+  etfRoleOf, computePositionFit, deriveStatus, buildAction,
   computePortfolioHealth, computeMarketAlignment, buildAlerts, sectorLabelFor,
   isBroadEtf, isGrowthEtf, positionTypeFor,
 } from '../../lib/review/reviewEngine';
@@ -163,15 +164,13 @@ export default function PortfolioReview() {
       const qualityByBase = new Map<string, CompanyQuality>();
       for (const r of rows) {
         if (qualityByBase.has(r.base)) continue;
-        if (positionTypeFor(r.h.ticker) !== 'Individual Stock') {
-          // Overlap: share of the fund's likely mega-cap names you already own
-          const overlap = isGrowthEtf(r.h.ticker)
-            ? Math.min(100, [...directNames].filter(n => ['AAPL','MSFT','NVDA','AMZN','META','GOOGL','GOOG','TSLA','AVGO','NFLX','ORCL','AMD','ANET'].includes(n)).length * 12)
-            : 0;
-          qualityByBase.set(r.base, computeEtfRole(r.h.ticker, overlap));
-        } else {
-          qualityByBase.set(r.base, computeCompanyQuality(metricsByBase.get(r.base) ?? null));
-        }
+        qualityByBase.set(
+          r.base,
+          positionTypeFor(r.h.ticker) !== 'Individual Stock'
+            // Product quality only — overlap is handled in Position Fit
+            ? computeEtfQuality(r.h.ticker)
+            : computeCompanyQuality(metricsByBase.get(r.base) ?? null),
+        );
       }
 
       // ── build one review per HOLDING (accounts stay separate) ─────────────
@@ -201,12 +200,31 @@ export default function PortfolioReview() {
         const targetRemainingPct = h.target_price && h.target_price > 0 && price > 0
           ? ((h.target_price - price) / price) * 100 : null;
 
-        const fit = computePositionFit({
-          companyQuality: quality.score, rsVsSector1M, ret3M,
-          positionPct, combinedExposurePct: combined,
-          sectorPressure: sector?.pressure ?? null,
-          targetRemainingPct, isEtf: quality.isEtf, isBroadEtf: broad,
-        });
+        // Funds are fitted on portfolio criteria (overlap, role, size, style),
+        // stocks on the company-oriented model.
+        const overlapPct = quality.isEtf ? computeEtfOverlap(h.ticker, directNames) : null;
+        const styleExposurePct = quality.isEtf
+          ? rows.filter(x => {
+              const t = positionTypeFor(x.h.ticker);
+              if (t === 'Growth/Index ETF') return true;
+              if (t !== 'Individual Stock') return false;
+              const e = overrides[x.h.ticker.toUpperCase()] ? null : detected[x.h.ticker.toUpperCase()];
+              return e === 'XLK' || e === 'XLC' || e === 'XLY';
+            }).reduce((s, x) => s + (x.cadValue / totalCAD) * 100, 0)
+          : null;
+
+        const fit = quality.isEtf
+          ? computeEtfPositionFit({
+              ticker: h.ticker, overlapPct, positionPct,
+              styleExposurePct, correlation: null, ret3M,
+              sectorPressure: sector?.pressure ?? null,
+            })
+          : computePositionFit({
+              companyQuality: quality.score, rsVsSector1M, ret3M,
+              positionPct, combinedExposurePct: combined,
+              sectorPressure: sector?.pressure ?? null,
+              targetRemainingPct, isEtf: false, isBroadEtf: false,
+            });
 
         const { status, flags: statusFlags } = deriveStatus({
           fit: fit.score, quality, combinedExposurePct: combined, pnlPct, rsVsSector1M,
@@ -217,11 +235,16 @@ export default function PortfolioReview() {
         // Position-level observations (business observations live on quality)
         const pros: string[] = [...quality.pros];
         const cons: string[] = [...quality.cons];
-        if (rsVsSector1M != null && rsVsSector1M > 0.05) pros.push(`Outperforming ${sectorLabel} by ${fmtPctS(rsVsSector1M)} over 1M`);
-        if (rsVsSector1M != null && rsVsSector1M < -0.05) cons.push(`Lagging ${sectorLabel} by ${fmtPctS(Math.abs(rsVsSector1M))} over 1M`);
-        if (pnlPct != null && pnlPct >= 25) pros.push(`Up ${pnlPct.toFixed(1)}% in this account`);
-        if (pnlPct != null && pnlPct <= -20) cons.push(`Down ${Math.abs(pnlPct).toFixed(1)}% in this account`);
-        if (combined >= EXPOSURE_THRESHOLDS.overweight && !broad) {
+        if (!quality.isEtf) {
+          if (rsVsSector1M != null && rsVsSector1M > 0.05) pros.push(`Outperforming ${sectorLabel} by ${fmtPctS(rsVsSector1M)} over 1M`);
+          if (rsVsSector1M != null && rsVsSector1M < -0.05) cons.push(`Lagging ${sectorLabel} by ${fmtPctS(Math.abs(rsVsSector1M))} over 1M`);
+          if (pnlPct != null && pnlPct >= 25) pros.push(`Up ${pnlPct.toFixed(1)}% in this account`);
+          if (pnlPct != null && pnlPct <= -20) cons.push(`Down ${Math.abs(pnlPct).toFixed(1)}% in this account`);
+        } else if (overlapPct != null && overlapPct >= 25) {
+          // Portfolio-fit concern, explicitly not a product-quality concern
+          cons.push(`Overlaps ~${overlapPct.toFixed(0)}% of its index weight with directly held names — a portfolio fit concern, not a fund quality issue`);
+        }
+        if (combined >= EXPOSURE_THRESHOLDS.overweight && !broad && !quality.isEtf) {
           cons.push(`Combined exposure across accounts is ${combined.toFixed(1)}% of the portfolio`);
         }
         if (sector && sector.pressure <= -22) cons.push(`${sectorLabel} rotation pressure ${signedInt(sector.pressure)}`);
@@ -231,7 +254,7 @@ export default function PortfolioReview() {
           status, flags: statusFlags, companyName: base, quality,
           combinedExposurePct: combined, siblingCount: siblingCount.get(base) ?? 1,
           pnlPct, rsVsSector1M, sectorLabel, sectorPressure: sector?.pressure ?? null,
-          isBroadEtf: broad, isGrowthEtf: growth,
+          isBroadEtf: broad, isGrowthEtf: growth, overlapPct,
         });
 
         return {
@@ -655,6 +678,12 @@ export default function PortfolioReview() {
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-base font-bold text-zinc-100">{r.ticker}</span>
                         <span className="text-sm text-zinc-500">{r.companyName}</span>
+                        {r.isEtf && etfRoleOf(r.ticker) && (
+                          <span className="text-xs bg-violet-500/10 text-violet-300 border border-violet-500/30 px-1.5 py-0.5 rounded font-semibold"
+                            title="Intended role of this fund in the portfolio — SATELLITE is not inferior to CORE, just a different job">
+                            {etfRoleOf(r.ticker)}
+                          </span>
+                        )}
                         {r.siblingCount > 1 && (
                           <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/30 px-1.5 py-0.5 rounded">
                             also held in {r.siblingCount - 1} other account{r.siblingCount > 2 ? 's' : ''}
