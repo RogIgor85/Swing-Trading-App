@@ -136,15 +136,18 @@ export const FIT_BANDS = {
 };
 
 export const PORTFOLIO_YTD_HELP =
-`Portfolio YTD (current holdings)
-Year-to-date price return of the positions you hold today, weighted by their
-current market value. For holdings bought during the year the return is measured
-from the purchase date.
+`Current Holdings YTD Price Return
+Shows the year-to-date price return of the securities currently held, weighted
+by their current market value. For a holding bought during the year the return
+is measured from its purchase date.
 
-Compared against SPY and TSX over the same year-to-date period.
+It does NOT account for positions that were sold, reduced, or added to during
+the year, nor for deposits and withdrawals. It is therefore not your true
+portfolio return — a time-weighted or money-weighted (XIRR) figure would require
+full transaction history.
 
-This is a price-return figure — it excludes deposits, withdrawals and the timing
-of purchases, so it is not a time-weighted or money-weighted return.`;
+Compared against SPY and TSX over the same year-to-date period, and deliberately
+excluded from the Portfolio Health score.`;
 
 export const PORTFOLIO_HEALTH_HELP =
 `Portfolio Health (0–10)

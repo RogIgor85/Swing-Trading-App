@@ -75,6 +75,8 @@ export interface PositionReview {
   currentPrice: number | null;
   pnlPct: number | null;
   marketValueNative: number;
+  /** CAD-converted market value — the ONLY basis for portfolio weighting. */
+  marketValueCAD: number;
   targetRemainingPct: number | null;
 }
 
@@ -414,11 +416,14 @@ export function buildAction(r: {
 export interface HealthComponent { key: keyof typeof PORTFOLIO_HEALTH_WEIGHTS; label: string; score: number; weight: number; detail: string }
 
 export interface PortfolioHealth {
+  /** Rounded to 1dp — the label is derived from this same value. */
   score: number;
   label: string;
   components: HealthComponent[];
   risks: string[];
   positives: string[];
+  /** Concentration sub-scores, each measuring a distinct (non-overlapping) risk. */
+  penalties: Array<{ factor: string; basis: string; score: number; weight: number }>;
 }
 
 export interface MarketAlignment {
@@ -453,8 +458,8 @@ export interface HealthInput {
   combinedExposure: Map<string, number>;
   /** base ticker → a representative ticker (for type lookup) */
   representativeTicker: Map<string, string>;
-  distinctSectors: number;
-  largestSectorPct: number;
+  /** sector label → % of portfolio (diversified funds excluded) */
+  sectorTotals: Map<string, number>;
   broadEtfPct: number;
   growthEtfPct: number;
   avgRs: number | null;
@@ -465,8 +470,11 @@ export function computePortfolioHealth(a: HealthInput): PortfolioHealth | null {
   const { reviews } = a;
   if (reviews.length === 0) return null;
   const W = PORTFOLIO_HEALTH_WEIGHTS;
-  const totalValue = reviews.reduce((s, r) => s + r.marketValueNative, 0) || 1;
-  const wt = (r: PositionReview) => r.marketValueNative / totalValue;
+  // Weighting is strictly by CAD value so USD and CAD holdings are comparable
+  const totalValue = reviews.reduce((s, r) => s + r.marketValueCAD, 0) || 1;
+  const wt = (r: PositionReview) => r.marketValueCAD / totalValue;
+  const distinctSectors = a.sectorTotals.size;
+  const largestSectorPct = Math.max(0, ...a.sectorTotals.values());
 
   const risks: string[] = [];
   const positives: string[] = [];
@@ -480,9 +488,9 @@ export function computePortfolioHealth(a: HealthInput): PortfolioHealth | null {
   // ── Diversification (20%) ────────────────────────────────────────────────
   const uniqueUnderlying = a.combinedExposure.size;
   let diversification =
-    band(a.distinctSectors, [[0, 3], [2, 4.5], [3, 5.5], [4, 6.5], [5, 7.3], [7, 8.2], [9, 9]]) * 0.45
+    band(distinctSectors, [[0, 3], [2, 4.5], [3, 5.5], [4, 6.5], [5, 7.3], [7, 8.2], [9, 9]]) * 0.45
     + band(uniqueUnderlying, [[0, 3], [3, 4.5], [5, 6], [8, 7.5], [12, 8.5], [18, 9.5]]) * 0.25
-    + band(-a.largestSectorPct, [[-80, 2], [-55, 4], [-40, 5.5], [-30, 7], [-22, 8.2], [-15, 9]]) * 0.30;
+    + band(-largestSectorPct, [[-80, 2], [-55, 4], [-40, 5.5], [-30, 7], [-22, 8.2], [-15, 9]]) * 0.30;
   // Broad diversified funds genuinely improve diversification
   const broadBonus = a.broadEtfPct >= 40 ? 1.5 : a.broadEtfPct >= 25 ? 1.1 : a.broadEtfPct >= 10 ? 0.6 : 0;
   diversification = clamp10(diversification + broadBonus);
@@ -500,22 +508,48 @@ export function computePortfolioHealth(a: HealthInput): PortfolioHealth | null {
   }
   stockExposures.sort((x, y) => y[1] - x[1]);
 
-  const largestStockPct = stockExposures[0]?.[1] ?? 0;
-  const top3Pct = stockExposures.slice(0, 3).reduce((s, [, p]) => s + p, 0);
+  const largestStock = stockExposures[0] ?? null;
+  const largestStockPct = largestStock?.[1] ?? 0;
+
+  // Each sub-score measures a DISTINCT risk. The largest single name is scored
+  // once, then excluded from the breadth and sector terms so the same exposure
+  // is not penalised three times.
+  const next2Pct = stockExposures.slice(1, 3).reduce((s, [, p]) => s + p, 0);
+
+  // Sector concentration BEYOND the single name already penalised above
+  let largestSectorLabel: string | null = null;
+  for (const [label, pct] of a.sectorTotals) {
+    if (pct === largestSectorPct) { largestSectorLabel = label; break; }
+  }
+  const largestStockSector = largestStock
+    ? reviews.find(r => r.base === largestStock[0])?.sectorLabel ?? null
+    : null;
+  const sectorExLargest = largestSectorLabel != null && largestStockSector === largestSectorLabel
+    ? Math.max(0, largestSectorPct - largestStockPct)
+    : largestSectorPct;
 
   const T = CONCENTRATION_BY_TYPE.stock;
   const sLargest = band(-largestStockPct, [[-60, 1], [-40, 2.5], [-T.excessive - 5, 4], [-T.excessive, 5], [-T.high, 6.5], [-T.elevated, 8], [-5, 9.5]]);
-  const sTop3    = band(-top3Pct, [[-90, 1.5], [-70, 3], [-55, 4.5], [-45, 6], [-32, 7.5], [-22, 9]]);
-  const sSector  = band(-a.largestSectorPct, [[-80, 1.5], [-60, 3], [-45, 4.5], [-35, 6], [-25, 7.5], [-18, 9]]);
+  const sNext2   = band(-next2Pct, [[-60, 1.5], [-45, 3], [-32, 4.5], [-24, 6], [-16, 7.5], [-8, 9]]);
+  const sSector  = band(-sectorExLargest, [[-60, 1.5], [-45, 3], [-35, 4.5], [-25, 6], [-18, 7.5], [-10, 9]]);
   const sGrowth  = band(-a.growthEtfPct, [[-60, 3], [-40, 4.5], [-25, 6], [-15, 7.5], [-5, 9]]);
-  const concentration = clamp10(sLargest * 0.40 + sTop3 * 0.25 + sSector * 0.20 + sGrowth * 0.15);
+  const concentration = clamp10(sLargest * 0.40 + sNext2 * 0.25 + sSector * 0.20 + sGrowth * 0.15);
 
-  if (largestStockPct >= T.excessive && stockExposures[0]) {
-    risks.push(`${stockExposures[0][0]} combined exposure ${largestStockPct.toFixed(1)}% — overweight for a single company`);
-  } else if (largestStockPct >= T.high && stockExposures[0]) {
-    risks.push(`${stockExposures[0][0]} combined exposure ${largestStockPct.toFixed(1)}% — high for a single company`);
+  const penalties: Array<{ factor: string; basis: string; score: number; weight: number }> = [
+    { factor: 'Largest single company', basis: largestStock ? `${largestStock[0]} ${largestStockPct.toFixed(1)}%` : 'none', score: sLargest, weight: 40 },
+    { factor: 'Next two companies',     basis: `${next2Pct.toFixed(1)}% (largest excluded)`, score: sNext2, weight: 25 },
+    { factor: 'Sector beyond top name', basis: `${largestSectorLabel ?? 'n/a'} ${sectorExLargest.toFixed(1)}%`, score: sSector, weight: 20 },
+    { factor: 'Growth/Nasdaq overlap',  basis: `${a.growthEtfPct.toFixed(1)}%`, score: sGrowth, weight: 15 },
+  ];
+
+  if (largestStockPct >= T.excessive && largestStock) {
+    risks.push(`${largestStock[0]} combined exposure ${largestStockPct.toFixed(1)}% — overweight for a single company`);
+  } else if (largestStockPct >= T.high && largestStock) {
+    risks.push(`${largestStock[0]} combined exposure ${largestStockPct.toFixed(1)}% — high for a single company`);
   }
-  if (a.largestSectorPct >= 35) risks.push(`Largest sector exposure ${a.largestSectorPct.toFixed(1)}%`);
+  if (sectorExLargest >= 25 && largestSectorLabel) {
+    risks.push(`${largestSectorLabel} exposure ${sectorExLargest.toFixed(1)}% beyond the largest holding`);
+  }
   if (a.growthEtfPct >= CONCENTRATION_BY_TYPE.growthEtf.high) {
     risks.push(`Growth / Nasdaq funds ${a.growthEtfPct.toFixed(1)}% — overlaps directly held large-cap names`);
   }
@@ -544,10 +578,10 @@ export function computePortfolioHealth(a: HealthInput): PortfolioHealth | null {
     { key: 'positionFit', label: HEALTH_COMPONENT_LABELS.positionFit, score: positionFit, weight: W.positionFit,
       detail: 'Value-weighted Position Fit' },
     { key: 'diversification', label: HEALTH_COMPONENT_LABELS.diversification, score: diversification, weight: W.diversification,
-      detail: `${a.distinctSectors} sectors · ${uniqueUnderlying} underlyings · ${a.broadEtfPct.toFixed(0)}% broad funds` },
+      detail: `${distinctSectors} sectors · ${uniqueUnderlying} underlyings · ${a.broadEtfPct.toFixed(0)}% broad funds` },
     { key: 'concentration', label: HEALTH_COMPONENT_LABELS.concentration, score: concentration, weight: W.concentration,
-      detail: stockExposures[0]
-        ? `Largest company ${stockExposures[0][0]} ${largestStockPct.toFixed(1)}% · top 3 ${top3Pct.toFixed(1)}% (broad funds excluded)`
+      detail: largestStock
+        ? `${largestStock[0]} ${largestStockPct.toFixed(1)}% · next two ${next2Pct.toFixed(1)}% · broad funds excluded`
         : 'No individual-company concentration' },
     { key: 'trendStrength', label: HEALTH_COMPONENT_LABELS.trendStrength, score: trendStrength, weight: W.trendStrength,
       detail: a.avgRs == null ? 'Relative strength unavailable' : `Average relative strength ${pctDec(a.avgRs)} vs sector` },
@@ -556,17 +590,36 @@ export function computePortfolioHealth(a: HealthInput): PortfolioHealth | null {
   ];
 
   const totalW = components.reduce((s, c) => s + c.weight, 0);
-  const score = clamp10(components.reduce((s, c) => s + c.score * c.weight, 0) / totalW);
+  const raw = clamp10(components.reduce((s, c) => s + c.score * c.weight, 0) / totalW);
+  // Standard mathematical rounding to 1dp. The LABEL is derived from the same
+  // rounded value the user sees, so display and label can never disagree.
+  const score = Math.round(raw * 10) / 10;
 
   if (import.meta.env?.DEV) {
-    // eslint-disable-next-line no-console
-    console.table(components.map(c => ({ component: c.label, score: +c.score.toFixed(2), weight: `${c.weight}%`, contribution: +(c.score * c.weight / totalW).toFixed(3) })));
-    // eslint-disable-next-line no-console
-    console.log('[health] final', score.toFixed(2), '| broad-ETF excluded from concentration:',
-      [...a.combinedExposure].filter(([b]) => positionTypeFor(a.representativeTicker.get(b) ?? b) === 'Broad-Market ETF').map(([b, p]) => `${b} ${p.toFixed(1)}%`));
+    /* eslint-disable no-console */
+    console.groupCollapsed(`[Portfolio Health] ${score.toFixed(1)} — ${labelFor(score, HEALTH_BANDS)} (raw ${raw.toFixed(4)})`);
+    console.table(components.map(c => ({
+      component: c.label,
+      score: +c.score.toFixed(2),
+      weight: `${c.weight}%`,
+      contribution: +(c.score * c.weight / totalW).toFixed(3),
+      basis: c.detail,
+    })));
+    console.table(penalties.map(p => ({ ...p, score: +p.score.toFixed(2), weight: `${p.weight}%` })));
+    console.log('excluded from concentration (broad funds):',
+      [...a.combinedExposure]
+        .filter(([b]) => positionTypeFor(a.representativeTicker.get(b) ?? b) === 'Broad-Market ETF')
+        .map(([b, p]) => `${b} ${p.toFixed(1)}%`));
+    console.log('largest name counted once; excluded from breadth and sector terms:',
+      largestStock ? `${largestStock[0]} ${largestStockPct.toFixed(1)}%` : 'none');
+    console.log('value weighting basis: CAD market value, total', Math.round(totalValue));
+    console.log('risks:', risks);
+    console.log('positives:', positives);
+    console.groupEnd();
+    /* eslint-enable no-console */
   }
 
-  return { score, label: labelFor(score, HEALTH_BANDS), components, risks, positives };
+  return { score, label: labelFor(score, HEALTH_BANDS), components, risks, positives, penalties };
 }
 
 /** Tactical read on current conditions — deliberately separate from Health. */
@@ -620,9 +673,9 @@ export function buildAlerts(
   growthEtfPct = 0,
 ): string[] {
   const out: string[] = [];
-  const totalValue = reviews.reduce((s, r) => s + r.marketValueNative, 0) || 1;
+  const totalValue = reviews.reduce((s, r) => s + r.marketValueCAD, 0) || 1;
   const valueShare = (s: ReviewStatus) =>
-    reviews.filter(r => r.status === s).reduce((sum, r) => sum + r.marketValueNative, 0) / totalValue * 100;
+    reviews.filter(r => r.status === s).reduce((sum, r) => sum + r.marketValueCAD, 0) / totalValue * 100;
   const count = (s: ReviewStatus) => reviews.filter(r => r.status === s).length;
 
   // Overweight is judged against the tolerance for what the holding IS —

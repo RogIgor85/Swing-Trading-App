@@ -294,7 +294,10 @@ describe('portfolio health', () => {
       status: 'STRONG HOLD', flags: [], pros: [], cons: [], action: '',
       sectorEtf: 'XLK', sectorLabel: 'Technology', sector: null,
       rsVsSector1M: 0.1, ret1M: 0.05, ret3M: 0.1,
-      currentPrice: 100, pnlPct: 20, marketValueNative: 1000, targetRemainingPct: 30,
+      currentPrice: 100, pnlPct: 20,
+      marketValueNative: over.marketValueNative ?? 1000,
+      marketValueCAD: over.marketValueCAD ?? over.marketValueNative ?? 1000,
+      targetRemainingPct: 30,
       ...over,
     };
   }
@@ -320,9 +323,12 @@ describe('portfolio health', () => {
       ['XEQT', 'XEQT.TO'], ['MSFT', 'MSFT'], ['QQC', 'QQC.TO'], ['META', 'META'],
       ['ORCL', 'ORCL'], ['TSLA', 'TSLA'], ['NFLX', 'NFLX'], ['ANET', 'ANET'],
     ]);
+    const sectorTotals = new Map<string, number>([
+      ['Technology', 33.5], ['Communication Services', 16], ['Consumer Discretionary', 3.8], ['Industrials', 4.3],
+    ]);
     return {
-      reviews, combinedExposure, representativeTicker,
-      distinctSectors: 4, largestSectorPct: 33, broadEtfPct: 32, growthEtfPct: 10.4,
+      reviews, combinedExposure, representativeTicker, sectorTotals,
+      broadEtfPct: 32, growthEtfPct: 10.4,
       avgRs: 0.08, avgSectorPressure: -14,
       ...over,
     };
@@ -345,11 +351,11 @@ describe('portfolio health', () => {
     expect(tactical).toBe(10);
   });
 
-  it('equals the weighted mean of its components', () => {
+  it('equals the weighted mean of its components, rounded to 1dp', () => {
     const h = computePortfolioHealth(realisticInput())!;
     const totalW = h.components.reduce((s, c) => s + c.weight, 0);
-    const expected = h.components.reduce((s, c) => s + c.score * c.weight, 0) / totalW;
-    expect(h.score).toBeCloseTo(expected, 6);
+    const raw = h.components.reduce((s, c) => s + c.score * c.weight, 0) / totalW;
+    expect(h.score).toBe(Math.round(raw * 10) / 10);
   });
 
   it('rates a structurally sound portfolio well above WEAK', () => {
@@ -396,7 +402,9 @@ describe('portfolio health', () => {
     // Same two REVIEW holdings, but now a third of the portfolio
     const bigReview = computePortfolioHealth(realisticInput({
       reviews: realisticInput().reviews.map(r =>
-        r.status === 'REVIEW' ? { ...r, marketValueNative: 3000, positionPct: 30 } : r),
+        r.status === 'REVIEW'
+          ? { ...r, marketValueNative: 3000, marketValueCAD: 3000, positionPct: 30 }
+          : r),
     }))!;
     expect(bigReview.components.find(c => c.key === 'positionFit')!.score)
       .toBeLessThan(smallReview.components.find(c => c.key === 'positionFit')!.score);
@@ -411,9 +419,49 @@ describe('portfolio health', () => {
   it('returns null for an empty portfolio', () => {
     expect(computePortfolioHealth({
       reviews: [], combinedExposure: new Map(), representativeTicker: new Map(),
-      distinctSectors: 0, largestSectorPct: 0, broadEtfPct: 0, growthEtfPct: 0,
+      sectorTotals: new Map(), broadEtfPct: 0, growthEtfPct: 0,
       avgRs: null, avgSectorPressure: null,
     })).toBeNull();
+  });
+
+  it('weights by CAD value so USD and CAD holdings are comparable', () => {
+    // Two holdings with equal NATIVE value but different currencies: the USD
+    // one is worth ~1.4x in CAD and must dominate the weighted quality.
+    const hiQ = { score: 9, isEtf: false, kind: 'company' as const, components: [], pros: [], cons: [], coverage: 1 };
+    const loQ = { score: 3, isEtf: false, kind: 'company' as const, components: [], pros: [], cons: [], coverage: 1 };
+    const reviews = [
+      review({ ticker: 'USDCO', base: 'USDCO', companyQuality: hiQ, marketValueNative: 1000, marketValueCAD: 1400 }),
+      review({ ticker: 'CADCO', base: 'CADCO', companyQuality: loQ, marketValueNative: 1000, marketValueCAD: 1000 }),
+    ];
+    const h = computePortfolioHealth({
+      reviews,
+      combinedExposure: new Map([['USDCO', 58], ['CADCO', 42]]),
+      representativeTicker: new Map([['USDCO', 'USDCO'], ['CADCO', 'CADCO']]),
+      sectorTotals: new Map([['Technology', 100]]),
+      broadEtfPct: 0, growthEtfPct: 0, avgRs: null, avgSectorPressure: null,
+    })!;
+    const aq = h.components.find(c => c.key === 'assetQuality')!.score;
+    // CAD-weighted: (9*1400 + 3*1000)/2400 = 6.5 — native weighting would give 6.0
+    expect(aq).toBeCloseTo(6.5, 2);
+  });
+
+  it('counts the largest holding once — not in breadth or sector terms too', () => {
+    const h = computePortfolioHealth(realisticInput())!;
+    const next2 = h.penalties.find(p => p.factor === 'Next two companies')!;
+    const sector = h.penalties.find(p => p.factor === 'Sector beyond top name')!;
+    // MSFT 26.5% must not appear in either basis
+    expect(next2.basis).toContain('largest excluded');
+    expect(parseFloat(sector.basis.match(/([\d.]+)%/)![1])).toBeLessThan(33.5);
+    expect(h.penalties.reduce((s, p) => s + p.weight, 0)).toBe(100);
+  });
+
+  it('rounds to one decimal and derives the label from the same value', () => {
+    const h = computePortfolioHealth(realisticInput())!;
+    expect(h.score).toBeCloseTo(Math.round(h.score * 10) / 10, 10);
+    const expectedLabel =
+      h.score >= 8.5 ? 'EXCELLENT' : h.score >= 7.0 ? 'HEALTHY'
+      : h.score >= 5.5 ? 'MIXED' : h.score >= 4.0 ? 'WEAK' : 'POOR';
+    expect(h.label).toBe(expectedLabel);
   });
 });
 
@@ -485,8 +533,8 @@ describe('alerts', () => {
 
   it('reports the value share of holdings needing review', () => {
     const reviews = [
-      { status: 'REVIEW', ticker: 'A', marketValueNative: 430 },
-      { status: 'STRONG HOLD', ticker: 'B', marketValueNative: 9570 },
+      { status: 'REVIEW', ticker: 'A', marketValueNative: 430, marketValueCAD: 430 },
+      { status: 'STRONG HOLD', ticker: 'B', marketValueNative: 9570, marketValueCAD: 9570 },
     ] as PositionReview[];
     const alerts = buildAlerts(reviews, new Map());
     expect(alerts.some(a => /4\.3% of value/.test(a))).toBe(true);

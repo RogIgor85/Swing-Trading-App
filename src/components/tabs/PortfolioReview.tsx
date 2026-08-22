@@ -243,7 +243,9 @@ export default function PortfolioReview() {
           positionPct, positionFit: fit.score, fitComponents: fit.components,
           status, flags: statusFlags, pros, cons, action,
           sectorEtf, sectorLabel, sector, rsVsSector1M, ret1M, ret3M,
-          currentPrice: price, pnlPct, marketValueNative: native, targetRemainingPct,
+          currentPrice: price, pnlPct,
+          marketValueNative: native, marketValueCAD: cadValue,
+          targetRemainingPct,
         };
       });
 
@@ -253,7 +255,6 @@ export default function PortfolioReview() {
       const totalCostCAD = rows.reduce((s, r) => s + r.costCAD, 0);
       const totalPnLCAD = totalCAD - totalCostCAD;
 
-      const sectorsPresent = new Set(reviews.filter(r => r.sectorEtf).map(r => r.sectorEtf!));
       const broadPct  = reviews.filter(r => isBroadEtf(r.ticker)).reduce((s, r) => s + r.positionPct, 0);
       const growthPct = reviews.filter(r => isGrowthEtf(r.ticker)).reduce((s, r) => s + r.positionPct, 0);
 
@@ -278,17 +279,13 @@ export default function PortfolioReview() {
         if (!r.sectorEtf) continue;
         sectorTotals.set(r.sectorLabel, (sectorTotals.get(r.sectorLabel) ?? 0) + r.positionPct);
       }
-      const largestSectorPct = Math.max(0, ...sectorTotals.values());
-
       // base ticker → a representative real ticker, so concentration rules can
       // tell a broad core fund apart from a single company
       const representativeTicker = new Map<string, string>();
       for (const r of rows) if (!representativeTicker.has(r.base)) representativeTicker.set(r.base, r.h.ticker);
 
       const health = computePortfolioHealth({
-        reviews, combinedExposure, representativeTicker,
-        distinctSectors: sectorsPresent.size,
-        largestSectorPct,
+        reviews, combinedExposure, representativeTicker, sectorTotals,
         broadEtfPct: broadPct,
         growthEtfPct: growthPct,
         avgRs, avgSectorPressure: avgPressure,
@@ -492,39 +489,77 @@ export default function PortfolioReview() {
                 <div className="text-xs text-zinc-600 mb-3">
                   Structural measure. Tactical factors carry 10% combined; benchmark performance is excluded entirely.
                 </div>
-                <div className="space-y-2">
-                  {result.health.components.map(c => (
-                    <div key={c.key} className="flex items-center gap-3 text-xs">
-                      <span className="text-zinc-300 w-48 flex-shrink-0">{c.label}</span>
-                      <span className="text-zinc-400 w-10 text-right tabular-nums font-medium">{c.score.toFixed(1)}</span>
-                      <span className="text-zinc-600 w-10 text-right tabular-nums">×{c.weight}%</span>
-                      <div className="w-28"><ScoreBar score={c.score} /></div>
-                      <span className="text-zinc-500 flex-1">{c.detail}</span>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-zinc-600 border-b border-zinc-800">
+                        <th className="text-left font-medium pb-1.5">Component</th>
+                        <th className="text-right font-medium pb-1.5">Score</th>
+                        <th className="text-right font-medium pb-1.5">Weight</th>
+                        <th className="text-right font-medium pb-1.5">Contribution</th>
+                        <th className="text-left font-medium pb-1.5 pl-4">Basis</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/50">
+                      {result.health.components.map(c => {
+                        const totalW = result.health!.components.reduce((s, x) => s + x.weight, 0);
+                        return (
+                          <tr key={c.key}>
+                            <td className="py-1.5 text-zinc-300">{c.label}</td>
+                            <td className="py-1.5 text-right tabular-nums text-zinc-200 font-medium">{c.score.toFixed(2)}</td>
+                            <td className="py-1.5 text-right tabular-nums text-zinc-500">× {c.weight}%</td>
+                            <td className="py-1.5 text-right tabular-nums text-zinc-300">= {(c.score * c.weight / totalW).toFixed(2)}</td>
+                            <td className="py-1.5 pl-4 text-zinc-500">{c.detail}</td>
+                          </tr>
+                        );
+                      })}
+                      <tr className="border-t-2 border-zinc-700">
+                        <td className="py-2 text-zinc-100 font-semibold">Final Portfolio Health</td>
+                        <td />
+                        <td />
+                        <td className="py-2 text-right tabular-nums text-zinc-100 font-bold">{result.health.score.toFixed(1)}</td>
+                        <td className="py-2 pl-4 text-zinc-400">{result.health.label}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="text-xs text-zinc-600 mt-2">
+                  Weighted by CAD market value. Score rounded to one decimal using standard rounding; the label is derived from that same rounded value.
+                </div>
+              </div>
+
+              {/* Concentration sub-scores — each a distinct, non-overlapping risk */}
+              <div className="pt-1">
+                <div className="text-xs font-medium text-zinc-300 mb-1.5">
+                  Concentration detail
+                  <span className="text-zinc-600 font-normal"> — the largest holding is scored once, then excluded from the breadth and sector terms</span>
+                </div>
+                <div className="space-y-0.5">
+                  {result.health.penalties.map(p => (
+                    <div key={p.factor} className="flex items-center gap-3 text-xs">
+                      <span className="text-zinc-400 w-48 flex-shrink-0">{p.factor}</span>
+                      <span className="text-zinc-200 w-10 text-right tabular-nums">{p.score.toFixed(2)}</span>
+                      <span className="text-zinc-600 w-12 text-right tabular-nums">× {p.weight}%</span>
+                      <span className="text-zinc-500 flex-1">{p.basis}</span>
                     </div>
                   ))}
-                  <div className="flex items-center gap-3 text-xs pt-2 border-t border-zinc-800">
-                    <span className="text-zinc-200 font-semibold w-48">Final</span>
-                    <span className="text-zinc-100 w-10 text-right tabular-nums font-bold">{result.health.score.toFixed(1)}</span>
-                    <span className="w-10" />
-                    <span className="text-zinc-600">{result.health.label}</span>
-                  </div>
                 </div>
               </div>
 
               <div className="grid sm:grid-cols-2 gap-4 pt-1">
                 <div>
-                  <div className="text-xs font-medium text-orange-400 mb-1.5">Primary Risks</div>
-                  {result.health.risks.length === 0
-                    ? <div className="text-xs text-zinc-600">No material structural risks detected</div>
-                    : <ul className="space-y-0.5">{result.health.risks.map((r, i) => (
-                        <li key={i} className="text-xs text-zinc-400">• {r}</li>))}</ul>}
-                </div>
-                <div>
-                  <div className="text-xs font-medium text-emerald-400 mb-1.5">Positive Factors</div>
+                  <div className="text-xs font-medium text-emerald-400 mb-1.5">Positive Drivers</div>
                   {result.health.positives.length === 0
                     ? <div className="text-xs text-zinc-600">—</div>
                     : <ul className="space-y-0.5">{result.health.positives.map((p, i) => (
                         <li key={i} className="text-xs text-zinc-400">• {p}</li>))}</ul>}
+                </div>
+                <div>
+                  <div className="text-xs font-medium text-orange-400 mb-1.5">Negative Drivers</div>
+                  {result.health.risks.length === 0
+                    ? <div className="text-xs text-zinc-600">No material structural risks detected</div>
+                    : <ul className="space-y-0.5">{result.health.risks.map((r, i) => (
+                        <li key={i} className="text-xs text-zinc-400">• {r}</li>))}</ul>}
                 </div>
               </div>
 
@@ -563,14 +598,14 @@ export default function PortfolioReview() {
               </div>
               {result.ytd.value == null ? (
                 <div className="text-xs text-zinc-500">
-                  Portfolio YTD return unavailable — not enough price history for your holdings.
+                  Current-holdings YTD return unavailable — not enough price history.
                   Benchmark comparison hidden rather than comparing mismatched periods.
                 </div>
               ) : (
                 <>
                   <div className="flex items-center gap-6 flex-wrap">
                     <div>
-                      <div className="text-xs text-zinc-500">Your portfolio YTD</div>
+                      <div className="text-xs text-zinc-500">Current Holdings YTD</div>
                       <div className={`text-lg font-bold ${pctColor(result.ytd.value)}`}>{fmtPctS(result.ytd.value)}</div>
                     </div>
                     <div>
@@ -583,8 +618,10 @@ export default function PortfolioReview() {
                     </div>
                   </div>
                   <div className="text-xs text-zinc-600 mt-2">
-                    Same period ({result.ytd.periodStart} → today). Price return of current holdings,
-                    {result.ytd.coverage < 0.99 ? ` ${(result.ytd.coverage * 100).toFixed(0)}% of portfolio value covered.` : ' full coverage.'}
+                    Price return of securities currently held, {result.ytd.periodStart} → today
+                    {result.ytd.coverage < 0.99 ? ` · ${(result.ytd.coverage * 100).toFixed(0)}% of value covered` : ''}.
+                    Does not account for positions sold, added to or reduced during the year — not a true portfolio return.
+                    Excluded from Portfolio Health.
                   </div>
                 </>
               )}
