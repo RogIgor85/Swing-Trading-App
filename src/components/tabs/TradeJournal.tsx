@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Plus, Trash2, TrendingUp, TrendingDown, X, Edit2, Check, ExternalLink, RefreshCw, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -9,7 +9,22 @@ import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
 import { toYahooTicker } from '../FundamentalsDrawer';
 import { fmtCurrency, fmtPct, fmt } from '../../lib/utils';
+import { getUsdCad, getUsdCadCached } from '../../lib/fx';
 import FundamentalsDrawer from '../FundamentalsDrawer';
+import { loadJournalMeta, setJournalMeta } from '../../lib/journal/journalMeta';
+import type { JournalMeta } from '../../lib/journal/journalMeta';
+import {
+  buildRows, computeCoreStats, computeHoldingStats, computeExtremes,
+  computeEquityCurve, computeDrawdown, computeMonthly, segmentBy,
+  holdingBucketOf, rotationContextOf, computeInsights, validateJournal,
+  inDateRange, hasInvalidDates,
+} from '../../lib/journal/journalStats';
+import type { Segment } from '../../lib/journal/journalStats';
+import {
+  EXIT_REASONS, MISTAKE_CATEGORIES, FOLLOWED_PLAN_OPTIONS,
+  PROFIT_FACTOR_HELP, PAYOFF_RATIO_HELP, EXPECTANCY_HELP, DRAWDOWN_HELP, CURRENCY_HELP,
+} from '../../config/journalConfig';
+import type { DateRangeKey } from '../../config/journalConfig';
 import type { TradeJournalEntry, Account, Currency } from '../../types';
 
 const TABLE = 'trade_journal';
@@ -62,6 +77,8 @@ const SORT_COLS: { label: string; key: SortKey }[] = [
   { label: 'Qty',        key: 'qty'              },
   { label: 'Entry',      key: 'entry_price'      },
   { label: 'Exit Date',  key: 'date_of_sale'     },
+  { label: 'Held',       key: 'date_of_sale'     },
+  { label: 'Strategy',   key: 'strategy'         },
   { label: 'Exit Price', key: 'avg_exit_price'   },
   { label: 'P&L',        key: 'realized_pnl'     },
   { label: 'P&L %',      key: 'realized_pnl_pct' },
@@ -88,6 +105,15 @@ export default function TradeJournal() {
 
   const [sortKey, setSortKey] = useState<SortKey>('date_of_buy');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+
+  const [journalMeta, setJMeta]   = useState(loadJournalMeta);
+  const [usdCadRate, setUsdCad]   = useState<number>(getUsdCadCached);
+  const [dateRange, setDateRange] = useState<DateRangeKey>('ALL');
+  const [chartMode, setChartMode] = useState<'pnl' | 'drawdown'>('pnl');
+  const [dateError, setDateError] = useState<string | null>(null);
+  const [metaForm, setMetaForm]   = useState<JournalMeta>({});
+
+  useEffect(() => { getUsdCad().then(setUsdCad).catch(() => { /* keep cached */ }); }, []);
 
   function handleSort(key: SortKey) {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -151,6 +177,8 @@ export default function TradeJournal() {
       exit_price:   t.exit_price?.toString() ?? '',
       notes:        t.notes ?? '',
     });
+    setMetaForm(journalMeta[t.id] ?? {});
+    setDateError(null);
     setShowForm(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
@@ -158,12 +186,21 @@ export default function TradeJournal() {
   function cancelForm() {
     setEditId(null);
     setForm(defaultForm);
+    setMetaForm({});
+    setDateError(null);
     setShowForm(false);
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!form.ticker || !form.qty || !form.entry_price) return;
+
+    // Exit can never precede entry — block the write rather than store bad data
+    if (hasInvalidDates(form.date_of_buy, form.date_of_sale)) {
+      setDateError('Exit date cannot be earlier than entry date.');
+      return;
+    }
+    setDateError(null);
     setLoading(true);
     try {
       const qty        = parseFloat(form.qty);
@@ -208,6 +245,11 @@ export default function TradeJournal() {
         await storage.insert(TABLE, record);
       }
 
+      // Journal metadata sidecar — keyed by trade id, schema untouched
+      if (Object.values(metaForm).some(v => v != null && v !== '')) {
+        setJMeta(setJournalMeta(record.id, metaForm));
+      }
+
       cancelForm();
       await load();
     } finally {
@@ -221,45 +263,56 @@ export default function TradeJournal() {
     await load();
   }
 
-  // ─── Stats ───────────────────────────────────────────────────────────────────
-  const closed = trades.filter((t) => t.status === 'CLOSED');
-  const open   = trades.filter((t) => t.status === 'OPEN');
-  const wins   = closed.filter((t) => t.win_loss === 'WIN');
-  const losses = closed.filter((t) => t.win_loss === 'LOSS');
-  const totalRealizedPnl = closed.reduce((s, t) => s + (t.realized_pnl ?? 0), 0);
-  const winRate  = closed.length > 0 ? (wins.length / closed.length) * 100 : 0;
-  const avgWin   = wins.length   > 0 ? wins.reduce((s, t)   => s + (t.realized_pnl ?? 0), 0) / wins.length   : 0;
-  const avgLoss  = losses.length > 0 ? losses.reduce((s, t) => s + (t.realized_pnl ?? 0), 0) / losses.length : 0;
-  const profitFactor = Math.abs(avgLoss) > 0 ? Math.abs(avgWin / avgLoss) : 0;
+  // ─── Stats (all math lives in journalStats) ──────────────────────────────────
+  const allRows = useMemo(() => buildRows(trades, journalMeta, usdCadRate), [trades, journalMeta, usdCadRate]);
 
-  // ─── Chart data ──────────────────────────────────────────────────────────────
-  // Monthly P&L bar chart
-  const monthlyMap: Record<string, { month: string; pnl: number; wins: number; losses: number }> = {};
-  closed.forEach((t) => {
-    const key = (t.date_of_sale ?? t.date_of_buy).slice(0, 7);
-    if (!monthlyMap[key]) monthlyMap[key] = { month: key, pnl: 0, wins: 0, losses: 0 };
-    monthlyMap[key].pnl += t.realized_pnl ?? 0;
-    if (t.win_loss === 'WIN')  monthlyMap[key].wins++;
-    if (t.win_loss === 'LOSS') monthlyMap[key].losses++;
-  });
-  const monthlyData = Object.values(monthlyMap).sort((a, b) => a.month.localeCompare(b.month));
+  // Date-range scoping — closed trades are placed by EXIT date
+  const rangeBounds = useMemo(() => {
+    const now = new Date();
+    if (dateRange === 'YTD') return { from: new Date(now.getFullYear(), 0, 1), to: null };
+    if (dateRange === '1Y')  return { from: new Date(now.getTime() - 365 * 86400000), to: null };
+    return { from: null, to: null };
+  }, [dateRange]);
 
-  // Cumulative P&L line chart
-  const sortedClosed = [...closed].sort((a, b) => {
-    const da = a.date_of_sale ?? a.date_of_buy;
-    const db = b.date_of_sale ?? b.date_of_buy;
-    return da.localeCompare(db);
-  });
-  let cumPnl = 0;
-  const cumulativeData = sortedClosed.map((t) => {
-    cumPnl += t.realized_pnl ?? 0;
-    return { label: `${t.ticker} (${t.date_of_sale ?? t.date_of_buy})`, cum: +cumPnl.toFixed(2) };
-  });
+  const rows = useMemo(
+    () => allRows.filter(r => inDateRange(r, rangeBounds.from, rangeBounds.to)),
+    [allRows, rangeBounds]);
+
+  const stats         = useMemo(() => computeCoreStats(rows), [rows]);
+  const holdingStats  = useMemo(() => computeHoldingStats(rows), [rows]);
+  const extremes      = useMemo(() => computeExtremes(rows), [rows]);
+  const equityCurve   = useMemo(() => computeEquityCurve(rows), [rows]);
+  const drawdown      = useMemo(() => computeDrawdown(equityCurve), [equityCurve]);
+  const monthlyData   = useMemo(() => computeMonthly(rows), [rows]);
+  const byStrategy    = useMemo(() => segmentBy(rows, r => r.t.strategy || null), [rows]);
+  const byAccount     = useMemo(() => segmentBy(rows, r => r.t.account), [rows]);
+  const byHolding     = useMemo(() => segmentBy(rows, r => holdingBucketOf(r.daysHeld)), [rows]);
+  const byRotation    = useMemo(() => segmentBy(rows, rotationContextOf), [rows]);
+  const insights      = useMemo(() => computeInsights(rows, holdingStats), [rows, holdingStats]);
+  const diagnostics   = useMemo(
+    () => validateJournal(rows, stats, equityCurve, monthlyData),
+    [rows, stats, equityCurve, monthlyData]);
+  const invalidDateRows = useMemo(() => allRows.filter(r => r.invalidDates), [allRows]);
+
+  // Kept for the existing markup below
+  const closed = rows.filter(r => r.t.status === 'CLOSED').map(r => r.t);
+  const open   = allRows.filter(r => r.t.status === 'OPEN').map(r => r.t);
+  const wins   = rows.filter(r => r.outcome === 'WIN' && r.t.status === 'CLOSED').map(r => r.t);
+  const losses = rows.filter(r => r.outcome === 'LOSS' && r.t.status === 'CLOSED').map(r => r.t);
+  const totalRealizedPnl = stats.netPnlCAD;
+  const winRate = stats.winRate ?? 0;
+  const avgWin  = stats.avgWinCAD ?? 0;
+  const avgLoss = stats.avgLossCAD ?? 0;
+  const profitFactor = stats.profitFactor ?? 0;
+
+  const cumulativeData = equityCurve.map(p => ({ label: p.label, cum: p.cum, dd: p.drawdown }));
+  const rowByTradeId = useMemo(() => new Map(allRows.map(r => [r.t.id, r])), [allRows]);
 
   // Win/Loss donut
   const donutData = [
-    { name: 'Wins',   value: wins.length,   color: '#10b981' },
-    { name: 'Losses', value: losses.length, color: '#ef4444' },
+    { name: 'Wins',      value: stats.wins,      color: '#10b981' },
+    { name: 'Losses',    value: stats.losses,    color: '#ef4444' },
+    { name: 'Breakeven', value: stats.breakeven, color: '#71717a' },
   ].filter((d) => d.value > 0);
 
   const uniqueAccounts = [...new Set(trades.map((t) => t.account))];
@@ -296,22 +349,133 @@ export default function TradeJournal() {
   return (
     <div className="space-y-6">
 
+      {/* ── Date range ───────────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-zinc-600">Period:</span>
+        {([['YTD', 'YTD'], ['1Y', '1 Year'], ['ALL', 'All Time']] as const).map(([k, label]) => (
+          <button key={k} onClick={() => setDateRange(k as DateRangeKey)}
+            className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+              dateRange === k ? 'bg-blue-900/50 text-blue-300 border-blue-600'
+                : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'}`}>
+            {label}
+          </button>
+        ))}
+        <span className="text-xs text-zinc-600 ml-auto" title={CURRENCY_HELP}>
+          All figures in CAD ⓘ
+        </span>
+      </div>
+
       {/* ── Stats bar ────────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
         {[
-          { label: 'Total Trades',         value: trades.length.toString(),                                           color: '' },
-          { label: 'Open',                 value: open.length.toString(),                                             color: 'text-blue-400' },
-          { label: 'Closed',               value: closed.length.toString(),                                           color: 'text-zinc-300' },
-          { label: 'Win Rate',             value: `${fmt(winRate, 1)}%`,                                              color: winRate >= 60 ? 'text-emerald-400' : winRate >= 40 ? 'text-amber-400' : 'text-red-400' },
-          { label: 'Realized P&L',         value: `${totalRealizedPnl >= 0 ? '+' : ''}${fmtCurrency(totalRealizedPnl)}`, color: totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400' },
-          { label: 'Profit Factor',        value: profitFactor > 0 ? `${profitFactor.toFixed(2)}x` : '—',            color: profitFactor >= 2 ? 'text-emerald-400' : profitFactor >= 1 ? 'text-amber-400' : 'text-red-400' },
-        ].map(({ label, value, color }) => (
-          <div key={label} className="card py-3">
-            <div className="text-xs text-zinc-500 mb-1">{label}</div>
+          { label: 'Total Trades',  value: trades.length.toString(), color: '' },
+          { label: 'Open',          value: open.length.toString(), color: 'text-blue-400' },
+          { label: 'Closed',        value: stats.trades.toString(), color: 'text-zinc-300' },
+          { label: 'Win Rate',      value: stats.winRate != null ? `${fmt(stats.winRate, 1)}%` : '—',
+            color: winRate >= 60 ? 'text-emerald-400' : winRate >= 40 ? 'text-amber-400' : 'text-red-400',
+            hint: `${stats.wins}W / ${stats.losses}L${stats.breakeven > 0 ? ` / ${stats.breakeven}BE` : ''}` },
+          { label: 'Realized P&L',  value: `${totalRealizedPnl >= 0 ? '+' : ''}${fmtCurrency(totalRealizedPnl)}`,
+            color: totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400', hint: 'CAD' },
+          { label: 'Profit Factor', value: stats.profitFactor == null ? '—' : stats.profitFactor === Infinity ? '∞' : `${stats.profitFactor.toFixed(2)}x`,
+            color: profitFactor >= 2 ? 'text-emerald-400' : profitFactor >= 1 ? 'text-amber-400' : 'text-red-400',
+            help: PROFIT_FACTOR_HELP, hint: 'gross W / gross L' },
+          { label: 'Payoff Ratio',  value: stats.payoffRatio != null ? `${stats.payoffRatio.toFixed(2)}x` : '—',
+            color: (stats.payoffRatio ?? 0) >= 2 ? 'text-emerald-400' : 'text-zinc-200',
+            help: PAYOFF_RATIO_HELP, hint: 'avg W / avg L' },
+          { label: 'Expectancy',    value: stats.expectancyCAD != null ? `${stats.expectancyCAD >= 0 ? '+' : ''}${fmtCurrency(stats.expectancyCAD)}` : '—',
+            color: (stats.expectancyCAD ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400',
+            help: EXPECTANCY_HELP, hint: 'per trade' },
+        ].map(({ label, value, color, help, hint }) => (
+          <div key={label} className="card py-3" title={help}>
+            <div className="text-xs text-zinc-500 mb-1 flex items-center gap-1">
+              {label}{help && <span className="text-zinc-700">ⓘ</span>}
+            </div>
             <div className={`text-lg font-bold tabular-nums ${color}`}>{value}</div>
+            {hint && <div className="text-xs text-zinc-600 mt-0.5">{hint}</div>}
           </div>
         ))}
       </div>
+
+      {/* Secondary metrics */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+        {[
+          { label: 'Avg Trade', value: stats.avgTradeCAD != null ? fmtCurrency(stats.avgTradeCAD) : '—',
+            color: (stats.avgTradeCAD ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400' },
+          { label: 'Max Drawdown', value: drawdown.maxDrawdownCAD < 0 ? fmtCurrency(drawdown.maxDrawdownCAD) : '—',
+            color: 'text-red-400', help: DRAWDOWN_HELP,
+            hint: drawdown.maxDrawdownCAD < 0 ? `peak ${fmtCurrency(drawdown.peakCAD)}` : undefined },
+          { label: 'Avg Hold', value: holdingStats.avgAll != null ? `${holdingStats.avgAll.toFixed(0)}d` : '—', color: 'text-zinc-200' },
+          { label: 'Avg Hold — Winners', value: holdingStats.avgWinners != null ? `${holdingStats.avgWinners.toFixed(0)}d` : '—', color: 'text-emerald-400',
+            hint: holdingStats.medianWinners != null ? `median ${holdingStats.medianWinners.toFixed(0)}d` : undefined },
+          { label: 'Avg Hold — Losers', value: holdingStats.avgLosers != null ? `${holdingStats.avgLosers.toFixed(0)}d` : '—', color: 'text-red-400',
+            hint: holdingStats.medianLosers != null ? `median ${holdingStats.medianLosers.toFixed(0)}d` : undefined },
+          { label: 'Best / Worst',
+            value: extremes.bestByDollar ? `${extremes.bestByDollar.t.ticker} / ${extremes.worstByDollar?.t.ticker ?? '—'}` : '—',
+            color: 'text-zinc-200',
+            hint: extremes.bestByDollar
+              ? `${fmtCurrency(extremes.bestByDollar.pnlCAD)} / ${extremes.worstByDollar ? fmtCurrency(extremes.worstByDollar.pnlCAD) : '—'}`
+              : undefined },
+        ].map(({ label, value, color, help, hint }) => (
+          <div key={label} className="card py-3" title={help}>
+            <div className="text-xs text-zinc-500 mb-1 flex items-center gap-1">
+              {label}{help && <span className="text-zinc-700">ⓘ</span>}
+            </div>
+            <div className={`text-base font-bold tabular-nums ${color}`}>{value}</div>
+            {hint && <div className="text-xs text-zinc-600 mt-0.5">{hint}</div>}
+          </div>
+        ))}
+      </div>
+
+      {/* Best / worst detail */}
+      {extremes.bestByPct && (
+        <div className="card py-2.5 flex flex-wrap gap-x-6 gap-y-1 text-xs">
+          {[
+            { label: 'Best $', r: extremes.bestByDollar },
+            { label: 'Best %', r: extremes.bestByPct },
+            { label: 'Worst $', r: extremes.worstByDollar },
+            { label: 'Worst %', r: extremes.worstByPct },
+          ].filter(x => x.r).map(({ label, r }) => (
+            <span key={label} className="text-zinc-500">
+              {label}: <span className="font-mono text-blue-400">{r!.t.ticker}</span>{' '}
+              <span className={r!.pnlCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                {r!.pnlCAD >= 0 ? '+' : ''}{fmtCurrency(r!.pnlCAD)}
+              </span>
+              {r!.pnlPct != null && <span className="text-zinc-600"> ({fmtPct(r!.pnlPct)})</span>}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Data integrity */}
+      {(diagnostics.length > 0 || invalidDateRows.length > 0) && (
+        <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl px-4 py-2.5 text-xs text-amber-400 space-y-0.5">
+          {diagnostics.map((d, i) => (
+            <div key={i}>⚠ {d.label}: expected {fmtCurrency(d.expected)}, got {fmtCurrency(d.actual)}</div>
+          ))}
+          {invalidDateRows.length > 0 && (
+            <div>
+              ⚠ {invalidDateRows.length} trade{invalidDateRows.length > 1 ? 's have' : ' has'} an exit date before the entry date
+              ({invalidDateRows.map(r => r.t.ticker).join(', ')}) — flagged for review, not modified.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Insights */}
+      {insights.length > 0 && (
+        <div className="card py-3">
+          <h2 className="text-sm font-semibold text-zinc-100 mb-2">What's Working</h2>
+          <div className="flex flex-wrap gap-x-8 gap-y-2">
+            {insights.map((i, idx) => (
+              <div key={idx}>
+                <div className="text-xs text-zinc-500">{i.label}</div>
+                <div className="text-sm font-semibold text-zinc-200">{i.value}</div>
+                {i.detail && <div className="text-xs text-zinc-600">{i.detail}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Win/Loss charts (only when there are closed trades) ──────────────── */}
       {closed.length > 0 && (
@@ -409,33 +573,125 @@ export default function TradeJournal() {
             )}
           </div>
 
-          {/* Cumulative P&L line */}
+          {/* Cumulative P&L / Drawdown */}
           <div className="card">
-            <h2 className="text-sm font-semibold text-zinc-100 mb-4">Cumulative P&L</h2>
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+              <h2 className="text-sm font-semibold text-zinc-100">
+                {chartMode === 'pnl' ? 'Cumulative P&L' : 'Drawdown'}
+              </h2>
+              <div className="flex gap-1">
+                {([['pnl', 'P&L'], ['drawdown', 'Drawdown']] as const).map(([k, label]) => (
+                  <button key={k} onClick={() => setChartMode(k)}
+                    title={k === 'drawdown' ? DRAWDOWN_HELP : undefined}
+                    className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                      chartMode === k ? 'bg-blue-900/50 text-blue-300 border-blue-600'
+                        : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
             {cumulativeData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={240}>
-                <LineChart data={cumulativeData} margin={{ top: 4, right: 4, left: 0, bottom: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#3f3f46" vertical={false} />
-                  <XAxis dataKey="label" tick={false} />
-                  <YAxis tick={{ fill: '#71717a', fontSize: 10 }} tickFormatter={(v) => `$${v >= 1000 ? `${(v/1000).toFixed(0)}k` : v >= 0 ? v : v}`} width={52} />
-                  <ReferenceLine y={0} stroke="#52525b" />
-                  <Tooltip
-                    {...TOOLTIP_STYLE}
-                    formatter={(v: number) => [fmtCurrency(v), 'Cumulative P&L']}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="cum"
-                    stroke={cumPnl >= 0 ? '#10b981' : '#ef4444'}
-                    strokeWidth={2}
-                    dot={{ r: 3, fill: cumPnl >= 0 ? '#10b981' : '#ef4444' }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+              <>
+                <ResponsiveContainer width="100%" height={240}>
+                  <LineChart data={cumulativeData} margin={{ top: 4, right: 4, left: 0, bottom: 4 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#3f3f46" vertical={false} />
+                    <XAxis dataKey="label" tick={false} />
+                    <YAxis tick={{ fill: '#71717a', fontSize: 10 }} tickFormatter={(v) => `$${Math.abs(v) >= 1000 ? `${(v/1000).toFixed(0)}k` : v}`} width={52} />
+                    <ReferenceLine y={0} stroke="#52525b" />
+                    <Tooltip
+                      {...TOOLTIP_STYLE}
+                      formatter={(v: number) => [fmtCurrency(v), chartMode === 'pnl' ? 'Cumulative P&L' : 'Drawdown']}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey={chartMode === 'pnl' ? 'cum' : 'dd'}
+                      stroke={chartMode === 'drawdown' ? '#ef4444' : totalRealizedPnl >= 0 ? '#10b981' : '#ef4444'}
+                      strokeWidth={2}
+                      dot={{ r: 3, fill: chartMode === 'drawdown' ? '#ef4444' : totalRealizedPnl >= 0 ? '#10b981' : '#ef4444' }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+                <div className="text-xs text-zinc-600 mt-1">
+                  {chartMode === 'pnl'
+                    ? 'Ordered by exit date — when the P&L was realized'
+                    : `Max drawdown ${fmtCurrency(drawdown.maxDrawdownCAD)} · currently ${fmtCurrency(drawdown.currentDrawdownCAD)} below peak`}
+                </div>
+              </>
             ) : (
               <p className="text-zinc-600 text-xs text-center py-10">No closed trades yet</p>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ── Performance breakdowns ───────────────────────────────────────────── */}
+      {stats.trades > 0 && (
+        <div className="space-y-4">
+          {([
+            { title: 'Performance by Strategy', rows: byStrategy, empty: 'No strategies recorded yet — set a Strategy on your trades to compare them.' },
+            { title: 'Performance by Account',  rows: byAccount,  empty: 'No account data.' },
+            { title: 'Performance by Holding Period', rows: byHolding, empty: 'Needs entry and exit dates to bucket trades.' },
+            { title: 'Performance by Rotation Context', rows: byRotation,
+              empty: 'No sector snapshots captured yet. New trades store the sector conditions at entry; historical trades show N/A.' },
+          ] as Array<{ title: string; rows: Segment[]; empty: string }>).map(({ title, rows: segs, empty }) => (
+            <div key={title} className="card overflow-hidden p-0">
+              <h2 className="text-sm font-semibold text-zinc-100 px-4 pt-4 pb-3">{title}</h2>
+              {segs.length === 0 ? (
+                <p className="text-zinc-600 text-xs px-4 pb-4">{empty}</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-zinc-800 bg-zinc-900/40 text-zinc-500">
+                        <th className="th text-left">{title.replace('Performance by ', '')}</th>
+                        <th className="th text-right">Trades</th>
+                        <th className="th text-right">W / L / BE</th>
+                        <th className="th text-right">Win Rate</th>
+                        <th className="th text-right">P&amp;L</th>
+                        <th className="th text-right">Avg Trade</th>
+                        <th className="th text-right">Avg Win</th>
+                        <th className="th text-right">Avg Loss</th>
+                        <th className="th text-right" title={PROFIT_FACTOR_HELP}>Profit Factor</th>
+                        <th className="th text-right" title={PAYOFF_RATIO_HELP}>Payoff</th>
+                        <th className="th text-right" title={EXPECTANCY_HELP}>Expectancy</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/60">
+                      {segs.map((s) => (
+                        <tr key={s.key} className="tr-hover">
+                          <td className="td text-zinc-200 font-medium">{s.key}</td>
+                          <td className="td text-right tabular-nums text-zinc-300">{s.trades}</td>
+                          <td className="td text-right tabular-nums text-zinc-500">
+                            <span className="text-emerald-400">{s.wins}</span> / <span className="text-red-400">{s.losses}</span>
+                            {s.breakeven > 0 && <> / {s.breakeven}</>}
+                          </td>
+                          <td className={`td text-right tabular-nums ${(s.winRate ?? 0) >= 50 ? 'text-emerald-400' : 'text-zinc-300'}`}>
+                            {s.winRate != null ? `${s.winRate.toFixed(0)}%` : '—'}
+                          </td>
+                          <td className={`td text-right tabular-nums font-semibold ${s.netPnlCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {s.netPnlCAD >= 0 ? '+' : ''}{fmtCurrency(s.netPnlCAD)}
+                          </td>
+                          <td className={`td text-right tabular-nums ${(s.avgTradeCAD ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {s.avgTradeCAD != null ? fmtCurrency(s.avgTradeCAD) : '—'}
+                          </td>
+                          <td className="td text-right tabular-nums text-emerald-400">{s.avgWinCAD != null ? fmtCurrency(s.avgWinCAD) : '—'}</td>
+                          <td className="td text-right tabular-nums text-red-400">{s.avgLossCAD != null ? fmtCurrency(s.avgLossCAD) : '—'}</td>
+                          <td className={`td text-right tabular-nums ${(s.profitFactor ?? 0) >= 1 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {s.profitFactor == null ? '—' : s.profitFactor === Infinity ? '∞' : `${s.profitFactor.toFixed(2)}x`}
+                          </td>
+                          <td className="td text-right tabular-nums text-zinc-300">{s.payoffRatio != null ? `${s.payoffRatio.toFixed(2)}x` : '—'}</td>
+                          <td className={`td text-right tabular-nums font-medium ${(s.expectancyCAD ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {s.expectancyCAD != null ? `${s.expectancyCAD >= 0 ? '+' : ''}${fmtCurrency(s.expectancyCAD)}` : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       )}
 
@@ -496,12 +752,64 @@ export default function TradeJournal() {
               </div>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div><label className="label">Date Sold</label><input className="input-base" type="date" value={form.date_of_sale} onChange={(e) => setForm({ ...form, date_of_sale: e.target.value })} /></div>
+              <div>
+                <label className="label">Exit Date</label>
+                <input className={`input-base ${dateError ? 'border-red-500' : ''}`} type="date"
+                  min={form.date_of_buy || undefined}
+                  value={form.date_of_sale}
+                  onChange={(e) => { setForm({ ...form, date_of_sale: e.target.value }); setDateError(null); }} />
+              </div>
               <div><label className="label">Exit Price</label><input className="input-base" type="number" step="0.0001" value={form.exit_price} onChange={(e) => setForm({ ...form, exit_price: e.target.value })} /></div>
               <div><label className="label">Company</label><input className="input-base" value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })} /></div>
               <div><label className="label">Industry</label><input className="input-base" value={form.industry} onChange={(e) => setForm({ ...form, industry: e.target.value })} /></div>
             </div>
             <div><label className="label">Notes</label><input className="input-base" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></div>
+            {/* Journal metadata — stored per trade in this browser */}
+            <div className="w-full border-t border-zinc-800 pt-3 mt-1">
+              <div className="text-xs text-zinc-500 mb-2">
+                Trade journal notes <span className="text-zinc-700">— saved in this browser, used for the performance breakdowns</span>
+              </div>
+              <div className="flex flex-wrap gap-3 items-end">
+                <div className="flex-1 min-w-52">
+                  <label className="label">Entry Reason</label>
+                  <input className="input-base" placeholder="Why you took the trade"
+                    value={metaForm.entry_reason ?? ''}
+                    onChange={(e) => setMetaForm({ ...metaForm, entry_reason: e.target.value })} />
+                </div>
+                <div className="w-44">
+                  <label className="label">Exit Reason</label>
+                  <select className="select-base" value={metaForm.exit_reason ?? ''}
+                    onChange={(e) => setMetaForm({ ...metaForm, exit_reason: (e.target.value || undefined) as typeof metaForm.exit_reason })}>
+                    <option value="">—</option>
+                    {EXIT_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+                <div className="w-32">
+                  <label className="label">Followed Plan?</label>
+                  <select className="select-base" value={metaForm.followed_plan ?? ''}
+                    onChange={(e) => setMetaForm({ ...metaForm, followed_plan: (e.target.value || undefined) as typeof metaForm.followed_plan })}>
+                    <option value="">—</option>
+                    {FOLLOWED_PLAN_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </div>
+                <div className="w-44">
+                  <label className="label">Mistake?</label>
+                  <select className="select-base" value={metaForm.mistake_category ?? ''}
+                    onChange={(e) => setMetaForm({
+                      ...metaForm,
+                      mistake_category: (e.target.value || undefined) as typeof metaForm.mistake_category,
+                      mistake: !!e.target.value,
+                    })}>
+                    <option value="">No</option>
+                    {MISTAKE_CATEGORIES.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {dateError && (
+              <p className="w-full text-xs text-red-400 -mt-1">{dateError}</p>
+            )}
             <button type="submit" className="btn-primary flex items-center gap-2" disabled={loading}>
               {editId ? <Check size={14} /> : <Plus size={14} />}
               {loading ? 'Saving...' : editId ? 'Update Trade' : 'Save Trade'}
@@ -566,7 +874,19 @@ export default function TradeJournal() {
                     <td className="td text-xs text-zinc-500">{t.currency}</td>
                     <td className="td tabular-nums text-xs">{fmt(t.qty, 0)}</td>
                     <td className="td tabular-nums">{fmtCurrency(t.entry_price)}</td>
-                    <td className="td text-zinc-400 text-xs">{t.date_of_sale ?? '—'}</td>
+                    <td className="td text-zinc-400 text-xs">
+                      {t.date_of_sale ?? '—'}
+                      {rowByTradeId.get(t.id)?.invalidDates && (
+                        <span className="text-amber-500 ml-1" title="Exit date is before the entry date — please review">⚠</span>
+                      )}
+                    </td>
+                    <td className="td text-zinc-400 text-xs tabular-nums">
+                      {(() => {
+                        const d = rowByTradeId.get(t.id)?.daysHeld;
+                        return d != null ? `${d}d` : '—';
+                      })()}
+                    </td>
+                    <td className="td text-zinc-500 text-xs truncate max-w-[110px]" title={t.strategy}>{t.strategy || '—'}</td>
                     <td className="td tabular-nums">
                       {t.avg_exit_price ? fmtCurrency(t.avg_exit_price) : (
                         t.status === 'OPEN' && livePrices[t.ticker]
