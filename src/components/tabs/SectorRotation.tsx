@@ -19,6 +19,7 @@ import {
   computeSectorMetrics, computeRegime, computeOpportunities, computeConstituentRows, quadrantOf,
 } from '../../lib/sector/sectorEngine';
 import type { SectorMetrics, Classification, ConstituentRow } from '../../lib/sector/sectorEngine';
+import { PRESSURE_HELP, describePressure, pressureBand } from '../../lib/sector/pressureHelp';
 import { SECTOR_ETFS, BENCHMARK_ETF, VOLUME_LEVELS } from '../../config/sectorConfig';
 import type { Timeframe, MatrixTimeframe } from '../../config/sectorConfig';
 import type { WatchItem, Conviction } from '../../types';
@@ -109,6 +110,7 @@ function SectorTooltipBody({ m, tf }: { m: SectorMetrics; tf?: MatrixTimeframe }
       <div className="font-bold text-zinc-100">{m.name} — {m.etf}</div>
       <div>Rotation Pressure: <span className={pressureColor(m.pressure)}>{signedInt(m.pressure)}</span>
         <span className="text-zinc-500 ml-1.5">Δ5D {signedInt(m.pressureDelta.d5)}</span></div>
+      <div className="text-zinc-500">{pressureBand(m.pressure)}</div>
       <div>Rotation Score: <span className="text-zinc-200">{m.score}</span> · <span className="text-zinc-300">{m.classification}</span></div>
       <div className="text-zinc-400">
         5D {fmtPctS(m.ret['5D'])} · 1M {fmtPctS(m.ret['1M'])} · 3M {fmtPctS(m.ret['3M'])}
@@ -372,7 +374,10 @@ export default function SectorRotation() {
                 Where Money Is Moving
                 <InfoTip text="This view estimates market rotation using price, relative strength, momentum, volume and breadth. It does not represent reported dollar fund flows." />
               </h3>
-              <span className="text-xs text-zinc-600">Rotation Pressure · −100 to +100</span>
+              <span className="text-xs text-zinc-600 flex items-center gap-1">
+                Rotation Pressure · −100 to +100
+                <InfoTip text={PRESSURE_HELP} />
+              </span>
             </div>
             <div className="text-xs text-zinc-600 mb-4">Estimated from price, relative strength, momentum, breadth &amp; volume — not literal fund flows</div>
 
@@ -439,7 +444,9 @@ export default function SectorRotation() {
                           {pos && <div className="h-3.5 rounded-r bg-gradient-to-r from-emerald-500 to-emerald-500/40" style={{ width: `${widthPct}%` }} />}
                         </div>
                       </div>
-                      <span className={`w-14 text-right text-xs font-bold tabular-nums shrink-0 flex items-center justify-end gap-1 ${pressureColor(m.pressure)}`}>
+                      <span
+                        title={describePressure(m.pressure, m.pressureDelta.d5, 'Rotation Pressure')}
+                        className={`w-14 text-right text-xs font-bold tabular-nums shrink-0 flex items-center justify-end gap-1 ${pressureColor(m.pressure)}`}>
                         {signedInt(m.pressure)} <TrendArrowIcon arrow={m.trendArrow} />
                       </span>
                       <span className={`w-14 text-right text-[11px] tabular-nums shrink-0 ${m.pressureDelta.d5 == null ? 'text-zinc-700' : m.pressureDelta.d5 >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
@@ -545,7 +552,7 @@ export default function SectorRotation() {
                     <div className="flex items-center justify-between text-xs tabular-nums">
                       <span className="text-zinc-500">vs SPY <span className={pctColor(m.rs['1M'])}>{fmtPctS(m.rs['1M'])}</span></span>
                       <span className="text-zinc-500">Rot <span className="text-zinc-200 font-semibold">{m.score}</span></span>
-                      <span className={`font-bold flex items-center gap-0.5 ${pressureColor(m.pressure)}`} title={`5D pressure change: ${signedInt(m.pressureDelta.d5)}`}>
+                      <span className={`font-bold flex items-center gap-0.5 ${pressureColor(m.pressure)}`} title={describePressure(m.pressure, m.pressureDelta.d5, 'Rotation Pressure')}>
                         {signedInt(m.pressure)} <TrendArrowIcon arrow={m.trendArrow} />
                         {m.pressureDelta.d5 != null && (
                           <span className={`text-[10px] font-medium ml-0.5 ${m.pressureDelta.d5 >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>{signedInt(m.pressureDelta.d5)}</span>
@@ -600,7 +607,9 @@ export default function SectorRotation() {
                       ['breadth', 'Breadth'], ['breadthD5', 'Br Δ5D'], ['volume', 'Vol'], ['pressure', 'Pressure'], ['score', 'Score'],
                     ] as [SortKey, string][]).map(([k, label]) => (
                       <th key={k} className={`th cursor-pointer select-none whitespace-nowrap ${k === 'name' ? 'text-left' : 'text-right'}`} onClick={() => toggleSort(k)}>
-                        {label} <SortIcon k={k} />
+                        {k === 'pressure'
+                          ? <span title={PRESSURE_HELP}>{label} ⓘ</span>
+                          : label} <SortIcon k={k} />
                       </th>
                     ))}
                     <th className="th text-right">Momentum</th>
@@ -628,7 +637,8 @@ export default function SectorRotation() {
                           {m.breadth?.change != null ? signedInt(m.breadth.change) : '—'}
                         </td>
                         <td className="td text-right tabular-nums text-zinc-300">{m.volumeRatio != null ? `${m.volumeRatio.toFixed(2)}x` : 'N/A'}</td>
-                        <td className={`td text-right tabular-nums font-bold ${pressureColor(m.pressure)}`}>
+                        <td className={`td text-right tabular-nums font-bold ${pressureColor(m.pressure)}`}
+                          title={describePressure(m.pressure, m.pressureDelta.d5, 'Rotation Pressure')}>
                           <span className="inline-flex items-center gap-1">{signedInt(m.pressure)} <TrendArrowIcon arrow={m.trendArrow} /></span>
                           {m.pressureDelta.d5 != null && (
                             <div className={`text-[10px] font-medium ${m.pressureDelta.d5 >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>Δ {signedInt(m.pressureDelta.d5)}</div>
@@ -731,7 +741,8 @@ export default function SectorRotation() {
                       <span className={`text-[10px] font-bold whitespace-nowrap ${o.direction === 'in' ? 'text-emerald-400' : 'text-red-400'}`}>{o.category}</span>
                     </div>
                     <div className="text-xs text-zinc-500 tabular-nums mb-1">
-                      Score {o.score} · Pressure <span className={pressureColor(o.pressure)}>{signedInt(o.pressure)}</span>
+                      Score {o.score} · Pressure <span className={pressureColor(o.pressure)}
+                        title={describePressure(o.pressure, o.pressureDelta5, 'Rotation Pressure')}>{signedInt(o.pressure)}</span>
                       {o.pressureDelta5 != null && <span className={o.pressureDelta5 >= 0 ? 'text-emerald-600' : 'text-red-600'}> (Δ5D {signedInt(o.pressureDelta5)})</span>}
                     </div>
                     <div className="text-xs text-zinc-500 tabular-nums mb-1.5">
@@ -1046,8 +1057,9 @@ function SectorDrillDown({ m, quotes, conHists, sectorCloses, spyCloses, onClose
           ['Volume', m.volumeRatio != null ? `${m.volumeRatio.toFixed(2)}x` : 'N/A', 'text-zinc-100'],
           ['Status', m.classification, classColor[m.classification].split(' ')[0]],
         ].map(([label, value, cls]) => (
-          <div key={label as string} className="bg-zinc-800/50 rounded-lg p-2">
-            <div className="text-zinc-500">{label}</div>
+          <div key={label as string} className="bg-zinc-800/50 rounded-lg p-2"
+            title={label === 'Pressure' ? describePressure(m.pressure, m.pressureDelta.d5, 'Rotation Pressure') : undefined}>
+            <div className="text-zinc-500">{label}{label === 'Pressure' && <span className="text-zinc-700 ml-0.5">ⓘ</span>}</div>
             <div className={`font-semibold mt-0.5 ${cls}`}>{value}</div>
           </div>
         ))}

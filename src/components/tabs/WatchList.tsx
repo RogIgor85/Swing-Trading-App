@@ -18,6 +18,7 @@ import { buildWatchRow, summarize, needsAttention, getMarket } from '../../lib/w
 import type { WatchRow } from '../../lib/watch/watchEngine';
 import { STATUS_STYLE, ALIGNMENT_STYLE, WATCH_THRESHOLDS } from '../../config/watchConfig';
 import type { WatchStatus } from '../../config/watchConfig';
+import { PRESSURE_HELP, describePressure } from '../../lib/sector/pressureHelp';
 import { fetchAllHistories, fetchConstituentQuotes, fetchConstituentHistories } from '../../lib/sector/sectorData';
 import { computeSectorMetrics } from '../../lib/sector/sectorEngine';
 import type { SectorMetrics } from '../../lib/sector/sectorEngine';
@@ -66,7 +67,7 @@ const signedPct = (x: number | null | undefined, d = 2): string =>
   x == null ? 'N/A' : `${x >= 0 ? '+' : ''}${x.toFixed(d)}%`;
 
 /** Compact labelled metric used across the card's stat strip. */
-function Stat({ label, value, cls, title }: { label: string; value: React.ReactNode; cls?: string; title?: string }) {
+function Stat({ label, value, cls, title }: { label: React.ReactNode; value: React.ReactNode; cls?: string; title?: string }) {
   return (
     <div className="min-w-[68px]" title={title}>
       <div className="text-[10px] uppercase tracking-wide text-zinc-600">{label}</div>
@@ -717,8 +718,10 @@ export default function WatchList() {
                     {/* Sector context */}
                     <div className="flex items-start gap-4 flex-shrink-0">
                       <Stat
-                        label="Sector Press."
-                        title={r.sector ? `${r.sector.name}: ${r.sector.classification}` : 'Sector data unavailable'}
+                        label={<span title={PRESSURE_HELP} className="cursor-help">Sector Press. <span className="text-zinc-700">ⓘ</span></span>}
+                        title={r.sector
+                          ? `${r.sector.name} (${r.sector.etf}) — ${r.sector.classification}\n\n${describePressure(r.sector.pressure, r.sector.pressureDelta.d5)}`
+                          : 'Sector Pressure unavailable — this ticker could not be matched to a tracked sector.'}
                         value={r.sector ? (
                           <span className="inline-flex items-center gap-1">
                             {r.sector.pressure >= 0 ? '+' : ''}{r.sector.pressure}
