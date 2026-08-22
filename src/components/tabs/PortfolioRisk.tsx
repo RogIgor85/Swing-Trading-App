@@ -1,10 +1,23 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Plus, Trash2, Edit2, X, Check, Pencil, RefreshCw, AlertTriangle, ExternalLink, ChevronUp, ChevronDown, ChevronsUpDown, Calendar, Target } from 'lucide-react';
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { storage, newId, nowIso } from '../../lib/storage';
-import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
 import { getUsdCad, getUsdCadCached } from '../../lib/fx';
+import { fetchQuote, fetchPortfolioHistories } from '../../lib/portfolio/portfolioData';
+import {
+  enrichHolding, withAllocation, computeTotals, computeAllocation,
+  computeConcentration, computeRotationExposure, validateTotals, accountTotalsOf,
+} from '../../lib/portfolio/portfolioEngine';
+import type { EnrichedHolding } from '../../lib/portfolio/portfolioEngine';
+import { computeCorrelationMatrix, averageCorrelation } from '../../lib/portfolio/correlation';
+import { CORRELATION_SETTINGS, ROTATION_EXPOSURE_HELP, HOLDING_STATUS_STYLE, UNCLASSIFIED_LABEL } from '../../config/portfolioConfig';
+import { resolveSectors } from '../../lib/watch/watchSectorContext';
+import { fetchAllHistories, fetchConstituentQuotes, fetchConstituentHistories } from '../../lib/sector/sectorData';
+import { computeSectorMetrics } from '../../lib/sector/sectorEngine';
+import type { SectorMetrics } from '../../lib/sector/sectorEngine';
+import { PRESSURE_HELP, describePressure } from '../../lib/sector/pressureHelp';
+import { navigateTo } from '../../lib/navigation';
 import { toYahooTicker } from '../FundamentalsDrawer';
 import { fmtCurrency, fmtPct, fmt } from '../../lib/utils';
 import FundamentalsDrawer from '../FundamentalsDrawer';
@@ -133,6 +146,15 @@ export default function PortfolioRisk() {
   // USD/CAD exchange rate — starts from last cached live rate
   const [usdCadRate, setUsdCadRate] = useState<number>(getUsdCadCached);
   const [rateLoading, setRateLoading] = useState(false);
+
+  // Data freshness + progressively-loaded intelligence
+  const [pricesUpdatedAt, setPricesUpdatedAt] = useState<Date | null>(null);
+  const [fxUpdatedAt, setFxUpdatedAt]         = useState<Date | null>(null);
+  const [closesByTicker, setCloses]           = useState<Map<string, number[]>>(new Map());
+  const [sectorMetricsMap, setSectorMetrics]  = useState<Map<string, SectorMetrics>>(new Map());
+  const [detectedSectors, setDetectedSectors] = useState<Record<string, string | null>>({});
+  const [corrDays, setCorrDays]               = useState<number>(CORRELATION_SETTINGS.defaultDays);
+  const [ctxLoading, setCtxLoading]           = useState(false);
   const [editingRate, setEditingRate] = useState(false);
   const [rateInput, setRateInput] = useState('');
   const rateInputRef = useRef<HTMLInputElement>(null);
@@ -146,7 +168,8 @@ export default function PortfolioRisk() {
   const [sellLoading, setSellLoading] = useState(false);
 
 
-  type SortKey = 'ticker' | 'account' | 'currency' | 'shares' | 'avg_cost' | 'currentPrice' | 'changePct' | 'costBasis' | 'marketValue' | 'pnl' | 'allocationPct' | 'sector' | 'purchase_date' | 'sell_date';
+  type SortKey = 'ticker' | 'account' | 'currency' | 'shares' | 'avg_cost' | 'currentPrice' | 'changePct' | 'costBasis' | 'marketValue' | 'pnl' | 'allocationPct' | 'sector' | 'purchase_date' | 'sell_date'
+    | 'pnlPct' | 'targetRemaining' | 'sectorPressure' | 'rsVsSector' | 'ret1M' | 'ret3M';
   const [sortKey, setSortKey]   = useState<SortKey | null>(null);
   const [sortDir, setSortDir]   = useState<'asc' | 'desc'>('asc');
 
@@ -171,7 +194,7 @@ export default function PortfolioRisk() {
     setRateLoading(true);
     try {
       const rate = await getUsdCad();
-      if (rate > 0) setUsdCadRate(rate);
+      if (rate > 0) { setUsdCadRate(rate); setFxUpdatedAt(new Date()); }
     } catch { /* keep cached/default */ } finally {
       setRateLoading(false);
     }
@@ -188,31 +211,57 @@ export default function PortfolioRisk() {
     setEditingRate(false);
   }
 
-  // Fetch stock prices — Finnhub first, Yahoo Finance fallback for tickers Finnhub can't resolve
+  // Fetch stock prices. Exchange-suffixed tickers (.TO etc.) go to Yahoo only —
+  // Finnhub ignores the suffix and returns the US listing's USD price, which
+  // previously corrupted CAD holdings' prices and daily moves.
   useEffect(() => {
     holdings.forEach(async (h) => {
       if (livePrices[h.ticker]) return; // already have it
-      try {
-        const q = await finnhub.quote(h.ticker);
-        if (q.c && q.c > 0) {
-          setLivePrices((prev) => ({ ...prev, [h.ticker]: { price: q.c, changePct: q.dp, prevClose: q.pc ?? q.c } }));
-          return;
-        }
-      } catch { /* fall through to Yahoo */ }
-
-      // Finnhub returned 0 or failed — try Yahoo Finance (handles TSX .TO tickers)
-      try {
-        const yahooTicker = toYahooTicker(h.ticker, h.currency);
-        const y = await fetchYahoo(yahooTicker);
-        const price = y.price?.regularMarketPrice ?? null;
-        if (price && price > 0) {
-          const prevClose = y.price?.regularMarketPreviousClose ?? price;
-          const changePct = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
-          setLivePrices((prev) => ({ ...prev, [h.ticker]: { price, changePct, prevClose } }));
-        }
-      } catch { /* give up */ }
+      const q = await fetchQuote(h.ticker);
+      if (q) {
+        setLivePrices((prev) => ({
+          ...prev,
+          [h.ticker]: {
+            price: q.price,
+            // percent kept for the localStorage contract other tabs read
+            changePct: q.prevClose ? ((q.price - q.prevClose) / q.prevClose) * 100 : 0,
+            prevClose: q.prevClose ?? 0,
+          },
+        }));
+        setPricesUpdatedAt(new Date());
+      }
     });
   }, [holdings]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Secondary intelligence (history, sectors, rotation) — loads AFTER prices
+  // so the table is never blocked waiting on it.
+  const tickerKey = holdings.map(h => h.ticker).sort().join(',');
+  useEffect(() => {
+    if (holdings.length === 0) return;
+    let live = true;
+    setCtxLoading(true);
+    (async () => {
+      try {
+        const tickers = holdings.map(h => h.ticker.toUpperCase());
+        const [hist, sectors] = await Promise.all([
+          fetchPortfolioHistories(tickers),
+          resolveSectors(tickers),
+        ]);
+        if (!live) return;
+        setCloses(hist);
+        setDetectedSectors(sectors);
+
+        const [sh, sq, sc] = await Promise.all([
+          fetchAllHistories(), fetchConstituentQuotes(), fetchConstituentHistories(),
+        ]);
+        if (!live) return;
+        setSectorMetrics(new Map(computeSectorMetrics(sh, sq, sc).map(m => [m.etf, m])));
+      } catch { /* optional context — table still works */ } finally {
+        if (live) setCtxLoading(false);
+      }
+    })();
+    return () => { live = false; };
+  }, [tickerKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist live prices to localStorage so Net Worth tab can read them
   useEffect(() => {
@@ -401,32 +450,48 @@ export default function PortfolioRisk() {
     await load();
   }
 
-  // Enrich each holding — native currency values + CAD equivalents
+  // Enrich each holding through the portfolio engine (all math lives there).
   const toCAD = (val: number, cur: Currency) => cur === 'USD' ? val * usdCadRate : val;
 
-  const enriched = holdings.map((h) => {
-    const lp = livePrices[h.ticker];
-    const finnhubPrice = lp?.price && lp.price > 0 ? lp.price : null;
-    const currentPrice = manualPrices[h.ticker] ?? finnhubPrice ?? h.avg_cost;
-    const priceSource: 'manual' | 'live' | 'cost' =
-      manualPrices[h.ticker] ? 'manual' : finnhubPrice ? 'live' : 'cost';
+  const engineRows: EnrichedHolding[] = useMemo(() => withAllocation(
+    holdings.map((h) => {
+      const lp = livePrices[h.ticker];
+      const manual = manualPrices[h.ticker];
+      const livePrice = lp?.price && lp.price > 0 ? lp.price : null;
+      const price = manual != null
+        ? { price: manual, prevClose: lp?.prevClose && lp.prevClose > 0 ? lp.prevClose : null, manual: true }
+        : livePrice != null
+          ? { price: livePrice, prevClose: lp?.prevClose && lp.prevClose > 0 ? lp.prevClose : null }
+          : null;
+      const sectorEtf = detectedSectors[h.ticker.toUpperCase()] ?? null;
+      return enrichHolding({
+        h, price, fxUsdCad: usdCadRate,
+        detectedSectorEtf: sectorEtf,
+        sector: sectorEtf ? sectorMetricsMap.get(sectorEtf) ?? null : null,
+        closes: closesByTicker.get(h.ticker.toUpperCase()),
+      });
+    })
+  ), [holdings, livePrices, manualPrices, usdCadRate, detectedSectors, sectorMetricsMap, closesByTicker]);
 
-    const marketValue = h.shares * currentPrice;           // native currency
-    const costBasis   = h.shares * h.avg_cost;             // native currency
-    const pnl         = marketValue - costBasis;            // native currency
-    const pnlPct      = costBasis > 0 ? (pnl / costBasis) * 100 : 0;
+  const engineByTicker = useMemo(
+    () => new Map(engineRows.map(r => [r.ticker, r])), [engineRows]);
 
-    const cadMarketValue = toCAD(marketValue, h.currency);
-    const cadCostBasis   = toCAD(costBasis, h.currency);
-    const cadPnl         = cadMarketValue - cadCostBasis;
-
-    return {
-      ...h, currentPrice, priceSource,
-      marketValue, costBasis, pnl, pnlPct,
-      cadMarketValue, cadCostBasis, cadPnl,
-      changePct: lp?.changePct ?? 0,
-    };
-  });
+  // Compatibility view — keeps the existing table markup working while
+  // exposing the full engine row as `_e` for the new columns.
+  const enriched = engineRows.map((r) => ({
+    ...r.h,
+    currentPrice: r.currentPrice ?? r.h.avg_cost,
+    priceSource: r.priceSource,
+    marketValue: r.marketValueNative,
+    costBasis: r.costBasisNative,
+    pnl: r.pnlNative,
+    pnlPct: r.pnlPct ?? 0,
+    cadMarketValue: r.marketValueCAD,
+    cadCostBasis: r.costBasisCAD,
+    cadPnl: r.pnlCAD,
+    changePct: r.dailyPct,
+    _e: r,
+  }));
 
   // ── Sell-target hits: banner + one browser notification per ticker per day ──
   const targetHits = enriched.filter(h =>
@@ -482,15 +547,31 @@ export default function PortfolioRisk() {
   const baseFiltered = filterAccount === 'ALL' ? withAlloc : withAlloc.filter((h) => h.account === filterAccount);
 
   // Sort
+  // Derived sort keys read from the engine row; missing data sorts last.
+  const DERIVED_SORTS: Record<string, (r: typeof baseFiltered[number]) => number> = {
+    pnlPct:          (r) => r.pnlPct ?? -9e9,
+    targetRemaining: (r) => r._e.targetRemainingPct ?? 9e9,   // closest to target first when asc
+    sectorPressure:  (r) => r._e.sectorEtf ? (sectorMetricsMap.get(r._e.sectorEtf)?.pressure ?? -9e9) : -9e9,
+    rsVsSector:      (r) => r._e.rsVsSector1M ?? -9e9,
+    ret1M:           (r) => r._e.ret1M ?? -9e9,
+    ret3M:           (r) => r._e.ret3M ?? -9e9,
+    changePct:       (r) => r.changePct ?? -9e9,
+  };
+
   const filtered = sortKey
     ? [...baseFiltered].sort((a, b) => {
-        const aVal = a[sortKey as keyof typeof a];
-        const bVal = b[sortKey as keyof typeof b];
         let cmp = 0;
-        if (typeof aVal === 'string' && typeof bVal === 'string') {
-          cmp = aVal.localeCompare(bVal);
+        const derive = DERIVED_SORTS[sortKey];
+        if (derive) {
+          cmp = derive(a) - derive(b);
         } else {
-          cmp = (aVal as number) - (bVal as number);
+          const aVal = a[sortKey as keyof typeof a];
+          const bVal = b[sortKey as keyof typeof b];
+          if (typeof aVal === 'string' && typeof bVal === 'string') {
+            cmp = aVal.localeCompare(bVal);
+          } else {
+            cmp = (aVal as number) - (bVal as number);
+          }
         }
         return sortDir === 'asc' ? cmp : -cmp;
       })
@@ -502,22 +583,14 @@ export default function PortfolioRisk() {
   const summaryPnLCAD   = summaryValueCAD - summaryCostCAD;
   const summaryPnLPct   = summaryCostCAD > 0 ? (summaryPnLCAD / summaryCostCAD) * 100 : 0;
 
-  // Daily change — use actual prevClose from price feed for each position
-  const dailyChangeCAD = filtered.reduce((s, h) => {
-    const lp = livePrices[h.ticker];
-    if (!lp || h.priceSource === 'manual') return s;
-    const pc = lp.prevClose > 0 ? lp.prevClose : lp.price;
-    return s + toCAD(h.shares * (lp.price - pc), h.currency);
-  }, 0);
-  // Yesterday's portfolio value = sum of (shares × prevClose) for live positions + cost basis for the rest
-  const prevPortfolioCAD = filtered.reduce((s, h) => {
-    const lp = livePrices[h.ticker];
-    if (!lp || h.priceSource === 'manual') return s + toCAD(h.costBasis, h.currency);
-    const pc = lp.prevClose > 0 ? lp.prevClose : lp.price;
-    return s + toCAD(h.shares * pc, h.currency);
-  }, 0);
-  const dailyChangePct = prevPortfolioCAD > 0 ? (dailyChangeCAD / prevPortfolioCAD) * 100 : 0;
-  const hasDailyData   = filtered.some((h) => livePrices[h.ticker] && h.priceSource !== 'manual');
+  // Daily change — computed by the engine strictly from previous-day closes
+  const filteredEngine = filtered
+    .map((h) => engineByTicker.get(h.ticker))
+    .filter((r): r is EnrichedHolding => !!r);
+  const totals = computeTotals(filteredEngine);
+  const dailyChangeCAD = totals.dailyPnlCAD ?? 0;
+  const dailyChangePct = totals.dailyPct ?? 0;
+  const hasDailyData   = totals.dailyPnlCAD != null;
 
 
   // Account breakdown (all accounts, CAD)
@@ -526,34 +599,33 @@ export default function PortfolioRisk() {
     accountMap[h.account] = (accountMap[h.account] ?? 0) + h.cadMarketValue;
   });
 
-  // Sector pie uses filtered view in CAD
-  const sectorMap: Record<string, number> = {};
-  filtered.forEach((h) => {
-    sectorMap[h.sector] = (sectorMap[h.sector] ?? 0) + h.cadMarketValue;
-  });
-  const sectorTotal = Object.values(sectorMap).reduce((s, v) => s + v, 0);
-  const pieData = Object.entries(sectorMap)
-    .map(([name, val]) => ({ name, value: +(sectorTotal > 0 ? (val / sectorTotal) * 100 : 0).toFixed(1) }));
+  // Sector allocation — ETFs bucketed honestly, totals to 100%
+  const allocation = computeAllocation(filteredEngine);
+  const pieData = allocation.map((a) => ({ name: a.label, value: +a.weightPct.toFixed(1) }));
 
-  const maxAlloc = filtered.reduce((m, h) => Math.max(m, h.allocationPct), 0);
-  const concentrationRisk = maxAlloc > 30 ? 'HIGH' : maxAlloc > 20 ? 'MEDIUM' : 'LOW';
+  const concentration = computeConcentration(filteredEngine, allocation);
+  const concentrationRisk = concentration.level;
+  const rotationExposure = computeRotationExposure(filteredEngine, sectorMetricsMap);
 
+  // Reconciliation diagnostics (surfaced, never silently hidden)
+  const diagnostics = validateTotals(filteredEngine, totals, allocation, accountTotalsOf(filteredEngine));
+
+  // Real historical return correlation
   const tickers = withAlloc.map((h) => h.ticker);
-  function sectorCorr(a: string, b: string): number {
-    if (a === b) return 1;
-    const sa = withAlloc.find((h) => h.ticker === a)?.sector;
-    const sb = withAlloc.find((h) => h.ticker === b)?.sector;
-    if (sa === sb) return 0.75;
-    const techGroup = ['Technology', 'Communication Services'];
-    if (techGroup.includes(sa ?? '') && techGroup.includes(sb ?? '')) return 0.6;
-    return 0.2;
-  }
-  function corrColor(v: number): string {
+  const corrMatrix = useMemo(
+    () => computeCorrelationMatrix(tickers, closesByTicker, corrDays),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tickers.join(','), closesByTicker, corrDays]);
+  const avgCorr = averageCorrelation(corrMatrix);
+
+  function corrColor(v: number | null): string {
+    if (v == null) return 'bg-zinc-800';
     if (v >= 0.9) return 'bg-red-700';
     if (v >= 0.7) return 'bg-red-600/60';
     if (v >= 0.5) return 'bg-amber-600/60';
     if (v >= 0.3) return 'bg-zinc-600';
-    return 'bg-zinc-700/50';
+    if (v >= -0.3) return 'bg-zinc-700/50';
+    return 'bg-blue-700/50';
   }
 
   const uniqueAccounts = [...new Set(holdings.map((h) => h.account))];
@@ -718,7 +790,12 @@ export default function PortfolioRisk() {
               ) : (
                 <div className="text-xl font-bold text-zinc-600">—</div>
               )}
-              <div className="text-xs text-zinc-700 mt-1">vs. prev close</div>
+              <div className="text-xs text-zinc-700 mt-1">
+                vs. prev close
+                {totals.dailyCoverage.counted < totals.dailyCoverage.total && (
+                  <span className="text-amber-600/80"> · {totals.dailyCoverage.counted}/{totals.dailyCoverage.total} priced</span>
+                )}
+              </div>
             </div>
             <div className="card py-3">
               <div className="text-xs text-zinc-500 mb-1">Holdings</div>
@@ -728,6 +805,52 @@ export default function PortfolioRisk() {
               </div>
               <div className="text-xs text-zinc-600 mt-0.5">{uniqueAccounts.length} accounts</div>
             </div>
+          </div>
+
+          {/* Portfolio context strip */}
+          <div className="card py-2.5">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+              <span className="flex items-center gap-1.5">
+                <span className="text-zinc-500">Rotation Exposure</span>
+                <span title={ROTATION_EXPOSURE_HELP} className="text-zinc-600 cursor-help">ⓘ</span>
+                {rotationExposure.value != null ? (
+                  <>
+                    <span className={`font-bold tabular-nums ${
+                      rotationExposure.value >= 22 ? 'text-emerald-400'
+                      : rotationExposure.value <= -22 ? 'text-red-400' : 'text-zinc-300'}`}>
+                      {rotationExposure.value >= 0 ? '+' : ''}{rotationExposure.value}
+                    </span>
+                    <span className="text-zinc-500">{rotationExposure.label}</span>
+                    <span className="text-zinc-700">({fmt(rotationExposure.classifiedPct, 0)}% classifiable)</span>
+                  </>
+                ) : <span className="text-zinc-600">N/A</span>}
+              </span>
+              {concentration.largestStock && (
+                <span className="text-zinc-500">
+                  Largest stock <span className="text-zinc-200 font-medium">{concentration.largestStock.ticker} {fmt(concentration.largestStock.pct, 1)}%</span>
+                </span>
+              )}
+              {concentration.largestSector && (
+                <span className="text-zinc-500">
+                  Largest sector <span className="text-zinc-200 font-medium">{concentration.largestSector.label} {fmt(concentration.largestSector.pct, 1)}%</span>
+                </span>
+              )}
+              <span className="text-zinc-500">
+                Diversified ETFs <span className="text-zinc-200 font-medium">{fmt(concentration.broadEtfPct, 1)}%</span>
+              </span>
+              <span className="ml-auto flex items-center gap-3 text-zinc-600">
+                {pricesUpdatedAt && <span>Prices {pricesUpdatedAt.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' })}</span>}
+                {fxUpdatedAt && <span>FX {fxUpdatedAt.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' })}</span>}
+                {ctxLoading && <span className="flex items-center gap-1"><RefreshCw size={10} className="animate-spin" /> context…</span>}
+              </span>
+            </div>
+            {diagnostics.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-amber-900/40 text-xs text-amber-400 space-y-0.5">
+                {diagnostics.map((d, i) => (
+                  <div key={i}>⚠ {d.label}: expected {fmtCAD(d.expected)}, got {fmtCAD(d.actual)} (diff {fmtCAD(d.diff)})</div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Holdings table */}
@@ -771,6 +894,9 @@ export default function PortfolioRisk() {
                       { label: 'Price / Day %',    key: 'currentPrice'  },
                       { label: 'Book → Mkt',       key: 'marketValue'   },
                       { label: 'P&L',              key: 'pnl'           },
+                      { label: 'Sector / Rotation', key: 'sectorPressure' },
+                      { label: 'vs Sector 1M',     key: 'rsVsSector'    },
+                      { label: 'To Target',        key: 'targetRemaining' },
                       { label: 'Alloc',            key: 'allocationPct' },
                     ] as { label: string; key: SortKey }[]).map(({ label, key }) => (
                       <th key={key} className="th">
@@ -853,8 +979,14 @@ export default function PortfolioRisk() {
                             )}
                           </div>
                         )}
-                        <div className={`${h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-600'}`}>
-                          {h.priceSource !== 'live' ? '—' : fmtPct(h.changePct)}
+                        <div
+                          className={`${h.changePct == null ? 'text-zinc-600' : h.changePct > 0 ? 'text-emerald-400' : h.changePct < 0 ? 'text-red-400' : 'text-zinc-500'}`}
+                          title={h.changePct == null
+                            ? (h._e.currentPrice == null ? 'Price unavailable' : 'Previous close unavailable — daily move cannot be calculated')
+                            : `Change vs previous close ${fmtCurrency(h._e.prevClose ?? 0)}${h._e.dailyFromManualPrice ? ' (using your manual price)' : ''}`}
+                        >
+                          {h.changePct == null ? '—' : fmtPct(h.changePct)}
+                          {h._e.dailyFromManualPrice && <span className="text-amber-500 ml-0.5">M</span>}
                         </div>
                         {h.target_price != null && (() => {
                           const upsidePct = h.currentPrice > 0 ? ((h.target_price - h.currentPrice) / h.currentPrice) * 100 : 0;
@@ -882,6 +1014,79 @@ export default function PortfolioRisk() {
                       <td className={`td tabular-nums text-right font-medium ${h.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         <div>{h.pnl >= 0 ? '+' : ''}{fmtCurrency(h.pnl)}</div>
                         <div className="font-normal">{fmtPct(h.pnlPct)}</div>
+                        <div className="font-normal text-zinc-600 text-[10px]" title="1-month and 3-month price return">
+                          {h._e.ret1M != null ? `1M ${h._e.ret1M >= 0 ? '+' : ''}${(h._e.ret1M * 100).toFixed(1)}%` : ''}
+                          {h._e.ret3M != null ? ` · 3M ${h._e.ret3M >= 0 ? '+' : ''}${(h._e.ret3M * 100).toFixed(1)}%` : ''}
+                        </div>
+                      </td>
+
+                      {/* Sector + rotation pressure */}
+                      <td className="td">
+                        {(() => {
+                          const e = h._e;
+                          const sm = e.sectorEtf ? sectorMetricsMap.get(e.sectorEtf) : null;
+                          return (
+                            <div className="leading-tight">
+                              <div className="flex items-center gap-1">
+                                {e.sectorEtf ? (
+                                  <button onClick={() => navigateTo('sectors', { sector: e.sectorEtf! })}
+                                    title={`Open ${e.sectorEtf} in Sector Rotation`}
+                                    className="text-zinc-300 hover:text-blue-300 hover:underline underline-offset-2 truncate max-w-[120px]">
+                                    {e.sectorLabel}
+                                  </button>
+                                ) : (
+                                  <span className={e.sectorLabel === UNCLASSIFIED_LABEL ? 'text-zinc-600' : 'text-zinc-400'}>{e.sectorLabel}</span>
+                                )}
+                                {e.sectorIsManual && <span className="text-[9px] text-amber-500 font-bold" title="Manual sector override">M</span>}
+                              </div>
+                              {sm ? (
+                                <div title={describePressure(sm.pressure, sm.pressureDelta.d5)}
+                                  className={`tabular-nums ${sm.pressure >= 22 ? 'text-emerald-400' : sm.pressure <= -22 ? 'text-red-400' : 'text-zinc-500'}`}>
+                                  {sm.pressure >= 0 ? '+' : ''}{sm.pressure}{' '}
+                                  {sm.trendArrow === 'up' ? '↑' : sm.trendArrow === 'down' ? '↓' : '→'}
+                                  <span className="text-zinc-600 ml-1">{sm.classification}</span>
+                                </div>
+                              ) : (
+                                <div className="text-zinc-700" title={e.isEtf ? 'Diversified funds have no single sector pressure' : PRESSURE_HELP}>—</div>
+                              )}
+                              <div className={`text-[10px] font-semibold ${HOLDING_STATUS_STYLE[e.status]}`}
+                                title={e.statusReasons.length > 0 ? e.statusReasons.join('\n') : 'No notable conditions'}>
+                                {e.status}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </td>
+
+                      {/* Stock vs sector (1M) */}
+                      <td className={`td tabular-nums text-right ${
+                        h._e.rsVsSector1M == null ? 'text-zinc-600'
+                        : h._e.rsVsSector1M >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+                        title={h._e.rsVsSector1M == null
+                          ? 'Needs both stock and sector 1-month returns'
+                          : `Stock 1M ${(h._e.ret1M! * 100).toFixed(1)}% vs sector ${(((h._e.ret1M! - h._e.rsVsSector1M)) * 100).toFixed(1)}%`}>
+                        {h._e.rsVsSector1M == null ? 'N/A'
+                          : `${h._e.rsVsSector1M >= 0 ? '+' : ''}${(h._e.rsVsSector1M * 100).toFixed(1)}%`}
+                      </td>
+
+                      {/* Distance to sell target */}
+                      <td className="td tabular-nums text-right">
+                        {h._e.targetRemainingPct == null ? (
+                          <span className="text-zinc-600">—</span>
+                        ) : h._e.targetStale ? (
+                          <span className="text-zinc-500" title={`Price is far past the $${h.target_price} target — consider updating it`}>stale</span>
+                        ) : (
+                          <>
+                            <div className={h._e.targetReached ? 'text-emerald-400 font-semibold' : h._e.nearTarget ? 'text-amber-400 font-semibold' : 'text-zinc-300'}>
+                              {h._e.targetRemainingPct >= 0 ? '+' : ''}{h._e.targetRemainingPct.toFixed(1)}%
+                            </div>
+                            {(h._e.targetReached || h._e.nearTarget) && (
+                              <div className={`text-[10px] font-bold ${h._e.targetReached ? 'text-emerald-500' : 'text-amber-500'}`}>
+                                {h._e.targetReached ? 'AT TARGET' : 'NEAR TARGET'}
+                              </div>
+                            )}
+                          </>
+                        )}
                       </td>
 
                       {/* Alloc % */}
@@ -981,27 +1186,46 @@ export default function PortfolioRisk() {
                 <h2 className="text-sm font-semibold text-zinc-100 mb-3">Concentration Analysis</h2>
                 <div className="space-y-1.5">
                   {[
-                    { label: 'Max single position', value: `${fmt(maxAlloc, 1)}%` },
+                    { label: 'Largest position', value: concentration.largestPosition ? `${concentration.largestPosition.ticker} ${fmt(concentration.largestPosition.pct, 1)}%` : 'N/A' },
+                    { label: 'Largest individual stock', value: concentration.largestStock ? `${concentration.largestStock.ticker} ${fmt(concentration.largestStock.pct, 1)}%` : 'N/A' },
+                    { label: 'Largest ETF', value: concentration.largestEtf ? `${concentration.largestEtf.ticker} ${fmt(concentration.largestEtf.pct, 1)}%` : 'N/A' },
+                    { label: 'Top 3 individual stocks', value: concentration.top3StocksPct != null ? `${fmt(concentration.top3StocksPct, 1)}%` : 'N/A' },
+                    { label: 'Top 5 holdings', value: concentration.top5Pct != null ? `${fmt(concentration.top5Pct, 1)}%` : 'N/A' },
+                    { label: 'Largest sector', value: concentration.largestSector ? `${concentration.largestSector.label} ${fmt(concentration.largestSector.pct, 1)}%` : 'N/A' },
+                    { label: 'Broad-market ETFs', value: `${fmt(concentration.broadEtfPct, 1)}%` },
                     { label: 'Concentration Risk', value: concentrationRisk, colored: true },
                     { label: 'Holdings shown', value: `${filtered.length}` },
-                    { label: 'Sectors', value: `${Object.keys(sectorMap).length}` },
                   ].map(({ label, value, colored }) => (
                     <div key={label} className="flex justify-between text-sm">
                       <span className="text-zinc-400">{label}</span>
                       {colored ? (
-                        <span className={`font-semibold px-2 py-0.5 rounded text-xs ${liquidityBg[value as LiquidityRisk]}`}>{value}</span>
+                        <span className={`font-semibold px-2 py-0.5 rounded text-xs ${
+                          value === 'LOW' ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700'
+                          : value === 'MODERATE' ? 'bg-amber-900/40 text-amber-300 border border-amber-700'
+                          : 'bg-red-900/40 text-red-300 border border-red-700'}`}>{value}</span>
                       ) : (
-                        <span className="font-medium">{value}</span>
+                        <span className="font-medium text-right">{value}</span>
                       )}
                     </div>
                   ))}
                 </div>
+                {concentration.reasons.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-zinc-800 text-xs text-zinc-500 space-y-0.5">
+                    <div className="text-zinc-600">Why {concentrationRisk}:</div>
+                    {concentration.reasons.map((r, i) => <div key={i}>• {r}</div>)}
+                    <div className="text-zinc-600 pt-1">Broad-market ETFs are diversified by construction and are weighted less heavily than single stocks.</div>
+                  </div>
+                )}
                 <div className="mt-3 space-y-1">
                   {[...filtered].sort((a, b) => b.allocationPct - a.allocationPct).slice(0, 8).map((h) => (
                     <div key={h.id} className="flex items-center gap-2 text-xs">
                       <span className="font-mono text-blue-400 w-14 flex-shrink-0">{h.ticker}</span>
                       <div className="flex-1 bg-zinc-700 rounded-full h-1.5">
-                        <div className={`h-1.5 rounded-full ${h.allocationPct > 30 ? 'bg-red-500' : h.allocationPct > 15 ? 'bg-amber-500' : 'bg-blue-500'}`} style={{ width: `${Math.min(h.allocationPct, 100)}%` }} />
+                        <div className={`h-1.5 rounded-full ${
+                          h._e.isEtf ? 'bg-blue-500'
+                          : h.allocationPct > 30 ? 'bg-red-500'
+                          : h.allocationPct > 15 ? 'bg-amber-500' : 'bg-zinc-500'}`}
+                          style={{ width: `${Math.min(h.allocationPct, 100)}%` }} />
                       </div>
                       <span className="tabular-nums text-zinc-400 w-8 text-right">{fmt(h.allocationPct, 1)}%</span>
                     </div>
@@ -1018,30 +1242,54 @@ export default function PortfolioRisk() {
                 <div>
                   <h2 className="text-base font-semibold text-zinc-100">Correlation Heatmap</h2>
                   <p className="text-xs text-zinc-600 mt-0.5">
-                    Sector-based estimate — not real price correlation.
-                    Higher values = stocks likely move together = less diversification benefit.
+                    {corrDays}-day daily return correlation
+                    {avgCorr != null && <> · average pair <span className="text-zinc-400 font-mono">{avgCorr.toFixed(2)}</span></>}
+                    {ctxLoading && <span className="ml-2 text-zinc-600">loading history…</span>}
                   </p>
                 </div>
-                {/* Legend */}
-                <div className="flex items-center gap-2 flex-wrap">
-                  {[
-                    { bg: 'bg-red-700',      label: '0.9–1.0', tip: 'Same stock or near-identical sector' },
-                    { bg: 'bg-red-600/60',   label: '0.7–0.9', tip: 'Same sector' },
-                    { bg: 'bg-amber-600/60', label: '0.5–0.7', tip: 'Related sectors (e.g. Tech + Comm)' },
-                    { bg: 'bg-zinc-600',     label: '0.3–0.5', tip: 'Moderate' },
-                    { bg: 'bg-zinc-700/50',  label: '0.0–0.3', tip: 'Low / unrelated sectors' },
-                  ].map(({ bg, label, tip }) => (
-                    <div key={label} className="flex items-center gap-1" title={tip}>
-                      <div className={`w-4 h-4 rounded ${bg}`} />
-                      <span className="text-xs text-zinc-500">{label}</span>
-                    </div>
-                  ))}
+                <div className="flex items-center gap-3 flex-wrap">
+                  {/* Timeframe */}
+                  <div className="flex gap-1">
+                    {CORRELATION_SETTINGS.options.map((d) => (
+                      <button key={d} onClick={() => setCorrDays(d)}
+                        className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                          corrDays === d ? 'bg-blue-900/50 text-blue-300 border-blue-600'
+                            : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:border-zinc-500'}`}>
+                        {d === 252 ? '1Y' : `${d}D`}
+                      </button>
+                    ))}
+                  </div>
+                  {/* Legend */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {[
+                      { bg: 'bg-red-700',      label: '0.9–1.0', tip: 'Move almost identically' },
+                      { bg: 'bg-red-600/60',   label: '0.7–0.9', tip: 'Strongly move together' },
+                      { bg: 'bg-amber-600/60', label: '0.5–0.7', tip: 'Moderately move together' },
+                      { bg: 'bg-zinc-600',     label: '0.3–0.5', tip: 'Weak relationship' },
+                      { bg: 'bg-zinc-700/50',  label: '−0.3–0.3', tip: 'Little linear relationship' },
+                      { bg: 'bg-blue-700/50',  label: '< −0.3',  tip: 'Tend to move opposite' },
+                    ].map(({ bg, label, tip }) => (
+                      <div key={label} className="flex items-center gap-1" title={tip}>
+                        <div className={`w-4 h-4 rounded ${bg}`} />
+                        <span className="text-xs text-zinc-500">{label}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
               <div className="mt-3 p-3 bg-zinc-900/50 rounded-lg border border-zinc-800 text-xs text-zinc-500 mb-4 space-y-1">
-                <div><span className="text-zinc-300 font-medium">How to read it:</span> Each cell shows how closely two stocks are expected to move together (0 = no relationship, 1 = move in lockstep).</div>
-                <div>Two Technology stocks get <span className="text-red-400 font-mono">0.75</span> — they tend to fall together in sell-offs. A Technology + Energy pair gets <span className="text-zinc-300 font-mono">0.20</span> — much better diversification.</div>
-                <div className="text-zinc-600">⚠ This uses sector rules, not actual 1-year price history. Use as a rough guide only.</div>
+                <div><span className="text-zinc-300 font-medium">How to read it:</span> Pearson correlation of actual daily returns over the selected window.</div>
+                <div>
+                  <span className="text-red-400 font-mono">1.00</span> = tends to move together ·
+                  <span className="text-zinc-300 font-mono"> 0.00</span> = little relationship ·
+                  <span className="text-blue-400 font-mono"> −1.00</span> = tends to move opposite.
+                  Higher values mean less diversification benefit.
+                </div>
+                {corrMatrix.unavailable.length > 0 && (
+                  <div className="text-zinc-600">
+                    Insufficient price history for: {corrMatrix.unavailable.join(', ')} — shown as N/A.
+                  </div>
+                )}
               </div>
               <div className="overflow-x-auto">
                 <table className="text-xs">
@@ -1056,14 +1304,17 @@ export default function PortfolioRisk() {
                       <tr key={rowT}>
                         <td className="font-mono text-zinc-400 pr-2 py-0.5 text-xs">{rowT.slice(0, 7)}</td>
                         {tickers.map((colT) => {
-                          const v = sectorCorr(rowT, colT);
+                          const v = corrMatrix.get(rowT, colT);
+                          const obs = corrMatrix.observations(rowT, colT);
                           return (
                             <td key={colT} className="p-0.5">
                               <div
                                 className={`w-9 h-9 rounded flex items-center justify-center font-semibold text-white/80 text-xs ${corrColor(v)}`}
-                                title={`${rowT} ↔ ${colT}: ${v.toFixed(2)}`}
+                                title={v == null
+                                  ? `${rowT} ↔ ${colT}: insufficient overlapping price history`
+                                  : `${rowT} ↔ ${colT}: ${v.toFixed(2)} (${rowT === colT ? 'same security' : `${obs} daily observations`})`}
                               >
-                                {fmt(v, 2)}
+                                {v == null ? <span className="text-zinc-600 text-[10px]">N/A</span> : v.toFixed(2)}
                               </div>
                             </td>
                           );
