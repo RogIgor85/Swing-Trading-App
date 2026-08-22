@@ -554,6 +554,165 @@ export function buildAction(r: {
   }
 }
 
+// ── Single routing entry point ───────────────────────────────────────────────
+// The ONLY supported way to review a holding. Callers cannot pick a scorer, so
+// an ETF can never fall through to company logic. Every branch is reported in
+// `routing` and logged in dev.
+
+export type SecurityKind = 'stock' | 'etf';
+
+export interface RoutingInfo {
+  ticker: string;
+  securityType: SecurityKind;
+  etfType: PositionType | null;
+  etfRole: EtfRole | null;
+  qualityScorer: 'etfQualityScorer' | 'companyQualityScorer';
+  positionFitScorer: 'etfPositionFitScorer' | 'stockPositionFitScorer';
+  statusLogic: 'etfStatusService' | 'stockStatusService';
+  actionGenerator: 'etfActionService' | 'stockActionService';
+}
+
+export interface ReviewHoldingInput {
+  ticker: string;
+  companyName: string;
+  /** Company fundamentals — ignored entirely for ETFs. */
+  metrics: Metric;
+  positionPct: number;
+  combinedExposurePct: number;
+  siblingCount: number;
+  pnlPct: number | null;
+  rsVsSector1M: number | null;
+  ret3M: number | null;
+  sectorLabel: string;
+  sectorPressure: number | null;
+  targetRemainingPct: number | null;
+  thesisBroken: boolean;
+  /** ETF-only inputs; ignored for stocks. */
+  directlyHeldBases?: Set<string>;
+  styleExposurePct?: number | null;
+  correlation?: number | null;
+}
+
+export interface ReviewHoldingResult {
+  quality: CompanyQuality;
+  fit: { score: number; components: FitComponent[] };
+  status: ReviewStatus;
+  flags: string[];
+  action: string;
+  overlapPct: number | null;
+  routing: RoutingInfo;
+}
+
+export function reviewHolding(i: ReviewHoldingInput): ReviewHoldingResult {
+  const type = positionTypeFor(i.ticker);
+  const isEtfHolding = type !== 'Individual Stock';
+  const broad = isBroadEtf(i.ticker);
+  const growth = isGrowthEtf(i.ticker);
+
+  const routing: RoutingInfo = {
+    ticker: i.ticker,
+    securityType: isEtfHolding ? 'etf' : 'stock',
+    etfType: isEtfHolding ? type : null,
+    etfRole: isEtfHolding ? etfRoleOf(i.ticker) : null,
+    qualityScorer: isEtfHolding ? 'etfQualityScorer' : 'companyQualityScorer',
+    positionFitScorer: isEtfHolding ? 'etfPositionFitScorer' : 'stockPositionFitScorer',
+    statusLogic: isEtfHolding ? 'etfStatusService' : 'stockStatusService',
+    actionGenerator: isEtfHolding ? 'etfActionService' : 'stockActionService',
+  };
+
+  let quality: CompanyQuality;
+  let fit: { score: number; components: FitComponent[] };
+  let overlapPct: number | null = null;
+
+  if (isEtfHolding) {
+    // Product quality only — company fundamentals are never consulted
+    quality = computeEtfQuality(i.ticker);
+    overlapPct = i.directlyHeldBases ? computeEtfOverlap(i.ticker, i.directlyHeldBases) : null;
+    fit = computeEtfPositionFit({
+      ticker: i.ticker,
+      overlapPct,
+      positionPct: i.positionPct,
+      styleExposurePct: i.styleExposurePct ?? null,
+      correlation: i.correlation ?? null,
+      ret3M: i.ret3M,
+      sectorPressure: i.sectorPressure,
+    });
+  } else {
+    quality = computeCompanyQuality(i.metrics);
+    fit = computePositionFit({
+      companyQuality: quality.score,
+      rsVsSector1M: i.rsVsSector1M,
+      ret3M: i.ret3M,
+      positionPct: i.positionPct,
+      combinedExposurePct: i.combinedExposurePct,
+      sectorPressure: i.sectorPressure,
+      targetRemainingPct: i.targetRemainingPct,
+      isEtf: false, isBroadEtf: false,
+    });
+  }
+
+  const { status, flags } = deriveStatus({
+    fit: fit.score, quality,
+    combinedExposurePct: i.combinedExposurePct,
+    pnlPct: i.pnlPct, rsVsSector1M: i.rsVsSector1M,
+    isEtf: isEtfHolding, isBroadEtf: broad,
+    thesisBroken: i.thesisBroken,
+  });
+
+  const action = buildAction({
+    status, flags, companyName: i.companyName, quality,
+    combinedExposurePct: i.combinedExposurePct, siblingCount: i.siblingCount,
+    pnlPct: i.pnlPct, rsVsSector1M: i.rsVsSector1M,
+    sectorLabel: i.sectorLabel, sectorPressure: i.sectorPressure,
+    isBroadEtf: broad, isGrowthEtf: growth, overlapPct,
+  });
+
+  if (import.meta.env?.DEV) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[review routing] ${routing.ticker} · ${routing.securityType}` +
+      `${routing.etfType ? ` (${routing.etfType}, role ${routing.etfRole})` : ''}` +
+      ` → quality=${routing.qualityScorer} fit=${routing.positionFitScorer}` +
+      ` status=${routing.statusLogic} action=${routing.actionGenerator}` +
+      ` | quality ${quality.score.toFixed(2)} fit ${fit.score.toFixed(2)} status ${status}` +
+      `${overlapPct != null ? ` overlap ${overlapPct.toFixed(1)}%` : ''}`
+    );
+  }
+
+  return { quality, fit, status, flags, action, overlapPct, routing };
+}
+
+/** Observations for a holding, routed the same way as its scoring. */
+export function buildObservations(
+  r: ReviewHoldingResult,
+  ctx: { sectorLabel: string; rsVsSector1M: number | null; pnlPct: number | null; combinedExposurePct: number; sectorPressure: number | null },
+): { pros: string[]; cons: string[] } {
+  const pros = [...r.quality.pros];
+  const cons = [...r.quality.cons];
+  const isEtfHolding = r.routing.securityType === 'etf';
+
+  if (isEtfHolding) {
+    // Portfolio-fit concerns — explicitly NOT product-quality concerns
+    if (r.overlapPct != null && r.overlapPct >= 20) {
+      cons.push(`Overlaps ~${r.overlapPct.toFixed(0)}% of its index weight with names you hold directly — a portfolio fit concern, not a fund quality issue`);
+    }
+    if (r.routing.etfType === 'Growth/Index ETF') {
+      cons.push('Adds to existing growth / mega-cap concentration rather than diversifying it');
+    }
+  } else {
+    if (ctx.rsVsSector1M != null && ctx.rsVsSector1M > 0.05) pros.push(`Outperforming ${ctx.sectorLabel} by ${pctDec(ctx.rsVsSector1M)} over 1M`);
+    if (ctx.rsVsSector1M != null && ctx.rsVsSector1M < -0.05) cons.push(`Lagging ${ctx.sectorLabel} by ${pctDec(Math.abs(ctx.rsVsSector1M))} over 1M`);
+    if (ctx.pnlPct != null && ctx.pnlPct >= 25) pros.push(`Up ${ctx.pnlPct.toFixed(1)}% in this account`);
+    if (ctx.pnlPct != null && ctx.pnlPct <= -20) cons.push(`Down ${Math.abs(ctx.pnlPct).toFixed(1)}% in this account`);
+    if (ctx.combinedExposurePct >= EXPOSURE_THRESHOLDS.overweight) {
+      cons.push(`Combined exposure across accounts is ${ctx.combinedExposurePct.toFixed(1)}% of the portfolio`);
+    }
+  }
+  if (ctx.sectorPressure != null && ctx.sectorPressure <= -22) cons.push(`${ctx.sectorLabel} rotation pressure ${ctx.sectorPressure}`);
+  if (ctx.sectorPressure != null && ctx.sectorPressure >= 22) pros.push(`${ctx.sectorLabel} rotation pressure +${ctx.sectorPressure}`);
+  return { pros, cons };
+}
+
 // ── Portfolio Health ─────────────────────────────────────────────────────────
 
 export interface HealthComponent { key: keyof typeof PORTFOLIO_HEALTH_WEIGHTS; label: string; score: number; weight: number; detail: string }

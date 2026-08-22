@@ -16,12 +16,11 @@ import { loadSectorOverrides } from '../../lib/portfolio/sectorOverrides';
 import { loadReviewFlags, setThesisBroken } from '../../lib/review/reviewFlags';
 import { computePortfolioYtd } from '../../lib/review/portfolioReturn';
 import {
-  computeCompanyQuality, computeEtfQuality, computeEtfPositionFit, computeEtfOverlap,
-  etfRoleOf, computePositionFit, deriveStatus, buildAction,
+  reviewHolding, buildObservations, etfRoleOf,
   computePortfolioHealth, computeMarketAlignment, buildAlerts, sectorLabelFor,
   isBroadEtf, isGrowthEtf, positionTypeFor,
 } from '../../lib/review/reviewEngine';
-import type { PositionReview, CompanyQuality } from '../../lib/review/reviewEngine';
+import type { PositionReview } from '../../lib/review/reviewEngine';
 import {
   REVIEW_STATUS_STYLE, PORTFOLIO_HEALTH_HELP, MARKET_ALIGNMENT_HELP, COMPANY_QUALITY_HELP,
   POSITION_FIT_HELP, PORTFOLIO_YTD_HELP, EXPOSURE_THRESHOLDS,
@@ -161,17 +160,6 @@ export default function PortfolioReview() {
 
       // Shared Company Quality per underlying (identical in every account)
       const directNames = new Set(rows.filter(r => positionTypeFor(r.h.ticker) === 'Individual Stock').map(r => r.base));
-      const qualityByBase = new Map<string, CompanyQuality>();
-      for (const r of rows) {
-        if (qualityByBase.has(r.base)) continue;
-        qualityByBase.set(
-          r.base,
-          positionTypeFor(r.h.ticker) !== 'Individual Stock'
-            // Product quality only — overlap is handled in Position Fit
-            ? computeEtfQuality(r.h.ticker)
-            : computeCompanyQuality(metricsByBase.get(r.base) ?? null),
-        );
-      }
 
       // ── build one review per HOLDING (accounts stay separate) ─────────────
       const reviews: PositionReview[] = rows.map(({ h, price, native, cadValue, base }) => {
@@ -191,80 +179,55 @@ export default function PortfolioReview() {
         const sector = sectorEtf ? sectorMetrics.get(sectorEtf) ?? null : null;
         const rsVsSector1M = ret1M != null && sector?.ret['1M'] != null ? ret1M - sector.ret['1M']! : null;
 
-        const quality = qualityByBase.get(base)!;
         const positionPct = (cadValue / totalCAD) * 100;
         const combined = combinedExposure.get(base) ?? positionPct;
-        const broad = isBroadEtf(h.ticker);
-        const growth = isGrowthEtf(h.ticker);
         const pnlPct = h.avg_cost > 0 ? ((price - h.avg_cost) / h.avg_cost) * 100 : null;
         const targetRemainingPct = h.target_price && h.target_price > 0 && price > 0
           ? ((h.target_price - price) / price) * 100 : null;
 
-        // Funds are fitted on portfolio criteria (overlap, role, size, style),
-        // stocks on the company-oriented model.
-        const overlapPct = quality.isEtf ? computeEtfOverlap(h.ticker, directNames) : null;
-        const styleExposurePct = quality.isEtf
-          ? rows.filter(x => {
-              const t = positionTypeFor(x.h.ticker);
-              if (t === 'Growth/Index ETF') return true;
-              if (t !== 'Individual Stock') return false;
-              const e = overrides[x.h.ticker.toUpperCase()] ? null : detected[x.h.ticker.toUpperCase()];
-              return e === 'XLK' || e === 'XLC' || e === 'XLY';
-            }).reduce((s, x) => s + (x.cadValue / totalCAD) * 100, 0)
-          : null;
+        // Growth/mega-cap style exposure — an ETF Position Fit input
+        const styleExposurePct = rows.filter(x => {
+          const t = positionTypeFor(x.h.ticker);
+          if (t === 'Growth/Index ETF') return true;
+          if (t !== 'Individual Stock') return false;
+          const e = overrides[x.h.ticker.toUpperCase()] ? null : detected[x.h.ticker.toUpperCase()];
+          return e === 'XLK' || e === 'XLC' || e === 'XLY';
+        }).reduce((s, x) => s + (x.cadValue / totalCAD) * 100, 0);
 
-        const fit = quality.isEtf
-          ? computeEtfPositionFit({
-              ticker: h.ticker, overlapPct, positionPct,
-              styleExposurePct, correlation: null, ret3M,
-              sectorPressure: sector?.pressure ?? null,
-            })
-          : computePositionFit({
-              companyQuality: quality.score, rsVsSector1M, ret3M,
-              positionPct, combinedExposurePct: combined,
-              sectorPressure: sector?.pressure ?? null,
-              targetRemainingPct, isEtf: false, isBroadEtf: false,
-            });
-
-        const { status, flags: statusFlags } = deriveStatus({
-          fit: fit.score, quality, combinedExposurePct: combined, pnlPct, rsVsSector1M,
-          isEtf: quality.isEtf, isBroadEtf: broad,
+        // SINGLE routing entry point — the component never picks a scorer, so
+        // an ETF cannot fall through to company logic.
+        const reviewed = reviewHolding({
+          ticker: h.ticker,
+          companyName: base,
+          metrics: metricsByBase.get(base) ?? null,
+          positionPct,
+          combinedExposurePct: combined,
+          siblingCount: siblingCount.get(base) ?? 1,
+          pnlPct, rsVsSector1M, ret3M,
+          sectorLabel,
+          sectorPressure: sector?.pressure ?? null,
+          targetRemainingPct,
           thesisBroken: !!flags[h.ticker.toUpperCase()]?.thesis_broken,
+          directlyHeldBases: directNames,
+          styleExposurePct,
+          correlation: null,
         });
 
-        // Position-level observations (business observations live on quality)
-        const pros: string[] = [...quality.pros];
-        const cons: string[] = [...quality.cons];
-        if (!quality.isEtf) {
-          if (rsVsSector1M != null && rsVsSector1M > 0.05) pros.push(`Outperforming ${sectorLabel} by ${fmtPctS(rsVsSector1M)} over 1M`);
-          if (rsVsSector1M != null && rsVsSector1M < -0.05) cons.push(`Lagging ${sectorLabel} by ${fmtPctS(Math.abs(rsVsSector1M))} over 1M`);
-          if (pnlPct != null && pnlPct >= 25) pros.push(`Up ${pnlPct.toFixed(1)}% in this account`);
-          if (pnlPct != null && pnlPct <= -20) cons.push(`Down ${Math.abs(pnlPct).toFixed(1)}% in this account`);
-        } else if (overlapPct != null && overlapPct >= 25) {
-          // Portfolio-fit concern, explicitly not a product-quality concern
-          cons.push(`Overlaps ~${overlapPct.toFixed(0)}% of its index weight with directly held names — a portfolio fit concern, not a fund quality issue`);
-        }
-        if (combined >= EXPOSURE_THRESHOLDS.overweight && !broad && !quality.isEtf) {
-          cons.push(`Combined exposure across accounts is ${combined.toFixed(1)}% of the portfolio`);
-        }
-        if (sector && sector.pressure <= -22) cons.push(`${sectorLabel} rotation pressure ${signedInt(sector.pressure)}`);
-        if (sector && sector.pressure >= 22) pros.push(`${sectorLabel} rotation pressure ${signedInt(sector.pressure)}`);
-
-        const action = buildAction({
-          status, flags: statusFlags, companyName: base, quality,
-          combinedExposurePct: combined, siblingCount: siblingCount.get(base) ?? 1,
-          pnlPct, rsVsSector1M, sectorLabel, sectorPressure: sector?.pressure ?? null,
-          isBroadEtf: broad, isGrowthEtf: growth, overlapPct,
+        const { pros, cons } = buildObservations(reviewed, {
+          sectorLabel, rsVsSector1M, pnlPct,
+          combinedExposurePct: combined,
+          sectorPressure: sector?.pressure ?? null,
         });
 
         return {
           holding: h, ticker: h.ticker, base, companyName: base,
           account: h.account, currency: h.currency,
-          positionType: positionTypeFor(h.ticker), isEtf: quality.isEtf,
-          companyQuality: quality, combinedExposurePct: combined,
+          positionType: positionTypeFor(h.ticker),
+          isEtf: reviewed.routing.securityType === 'etf',
+          companyQuality: reviewed.quality, combinedExposurePct: combined,
           siblingCount: siblingCount.get(base) ?? 1,
-          positionPct, positionFit: fit.score, fitComponents: fit.components,
-          status, flags: statusFlags, pros, cons, action,
+          positionPct, positionFit: reviewed.fit.score, fitComponents: reviewed.fit.components,
+          status: reviewed.status, flags: reviewed.flags, pros, cons, action: reviewed.action,
           sectorEtf, sectorLabel, sector, rsVsSector1M, ret1M, ret3M,
           currentPrice: price, pnlPct,
           marketValueNative: native, marketValueCAD: cadValue,

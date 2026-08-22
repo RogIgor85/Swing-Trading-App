@@ -3,6 +3,7 @@ import {
   computeCompanyQuality, computeEtfQuality, computeEtfPositionFit, computeEtfOverlap, etfRoleOf, computePositionFit, deriveStatus,
   buildAction, computePortfolioHealth, computeMarketAlignment, buildAlerts,
   isOverweightExposure, sectorLabelFor, isBroadEtf, isGrowthEtf, positionTypeFor,
+  reviewHolding, buildObservations,
 } from './reviewEngine';
 import type { CompanyQuality, PositionReview } from './reviewEngine';
 import { computePortfolioYtd } from './portfolioReturn';
@@ -664,5 +665,116 @@ describe('Microsoft two-account scenario', () => {
 
   it('uses the configured overweight threshold', () => {
     expect(combined).toBeGreaterThanOrEqual(EXPOSURE_THRESHOLDS.overweight);
+  });
+});
+
+// ── ROUTING: ETFs must never fall through to company/stock logic ─────────────
+
+describe('review routing', () => {
+  const base = {
+    companyName: 'X', metrics: excellent as Metric,
+    positionPct: 10.4, combinedExposurePct: 10.4, siblingCount: 1,
+    pnlPct: -2.4, rsVsSector1M: null, ret3M: 0.02,
+    sectorLabel: 'Technology', sectorPressure: -17,
+    targetRemainingPct: null, thesisBroken: false,
+    directlyHeldBases: new Set(['MSFT', 'META', 'NFLX', 'ORCL', 'ANET']),
+    styleExposurePct: 58, correlation: null,
+  };
+
+  it('routes QQC.TO entirely through ETF services', () => {
+    const r = reviewHolding({ ...base, ticker: 'QQC.TO', companyName: 'QQC' });
+    expect(r.routing).toMatchObject({
+      securityType: 'etf',
+      etfType: 'Growth/Index ETF',
+      etfRole: 'SATELLITE',
+      qualityScorer: 'etfQualityScorer',
+      positionFitScorer: 'etfPositionFitScorer',
+      statusLogic: 'etfStatusService',
+      actionGenerator: 'etfActionService',
+    });
+    expect(r.quality.kind).toBe('etf');
+  });
+
+  it('routes XEQT.TO as a broad diversified core fund and keeps CORE', () => {
+    const r = reviewHolding({ ...base, ticker: 'XEQT.TO', companyName: 'XEQT', positionPct: 32, combinedExposurePct: 32 });
+    expect(r.routing.etfType).toBe('Broad-Market ETF');
+    expect(r.routing.etfRole).toBe('CORE');
+    expect(r.routing.qualityScorer).toBe('etfQualityScorer');
+    expect(r.status).toBe('CORE');
+    expect(r.quality.score).toBeGreaterThan(8);
+  });
+
+  it('routes MSFT and ORCL through company/stock logic', () => {
+    for (const t of ['MSFT', 'ORCL']) {
+      const r = reviewHolding({ ...base, ticker: t, companyName: t });
+      expect(r.routing).toMatchObject({
+        securityType: 'stock',
+        etfType: null,
+        qualityScorer: 'companyQualityScorer',
+        positionFitScorer: 'stockPositionFitScorer',
+        statusLogic: 'stockStatusService',
+        actionGenerator: 'stockActionService',
+      });
+      expect(r.quality.kind).toBe('company');
+    }
+  });
+
+  it('ORCL can still reach REVIEW from a position drawdown', () => {
+    const r = reviewHolding({ ...base, ticker: 'ORCL', companyName: 'ORCL', pnlPct: -30, rsVsSector1M: -0.12 });
+    expect(r.routing.securityType).toBe('stock');
+    expect(r.status).toBe('REVIEW');
+  });
+
+  it('QQC ignores company fundamentals entirely', () => {
+    const withGood = reviewHolding({ ...base, ticker: 'QQC.TO', metrics: excellent as Metric });
+    const withPoor = reviewHolding({ ...base, ticker: 'QQC.TO', metrics: poor as Metric });
+    const withNone = reviewHolding({ ...base, ticker: 'QQC.TO', metrics: null });
+    expect(withGood.quality.score).toBe(withPoor.quality.score);
+    expect(withGood.quality.score).toBe(withNone.quality.score);
+  });
+
+  it('QQC at -2.4% is not put on WATCH', () => {
+    const r = reviewHolding({ ...base, ticker: 'QQC.TO', companyName: 'QQC' });
+    expect(r.status).not.toBe('WATCH');
+    expect(['HOLD', 'STRONG HOLD']).toContain(r.status);
+  });
+
+  it('no ETF action ever mentions earnings', () => {
+    for (const t of ['QQC.TO', 'XEQT.TO', 'XLK']) {
+      for (const pnl of [-2.4, -30, 15]) {
+        const r = reviewHolding({ ...base, ticker: t, companyName: t, pnlPct: pnl });
+        expect(r.action).not.toMatch(/earnings/i);
+      }
+    }
+  });
+
+  it('overlap lowers Position Fit while leaving ETF Quality untouched', () => {
+    const noOverlap = reviewHolding({ ...base, ticker: 'QQC.TO', directlyHeldBases: new Set() });
+    const heavy = reviewHolding({
+      ...base, ticker: 'QQC.TO',
+      directlyHeldBases: new Set(['MSFT', 'AAPL', 'NVDA', 'AMZN', 'META', 'TSLA', 'NFLX']),
+    });
+    expect(heavy.quality.score).toBe(noOverlap.quality.score);   // quality unchanged
+    expect(heavy.fit.score).toBeLessThan(noOverlap.fit.score);   // fit falls
+    expect(heavy.overlapPct!).toBeGreaterThan(noOverlap.overlapPct!);
+  });
+
+  it('QQC ends up high quality with only moderate fit', () => {
+    const r = reviewHolding({ ...base, ticker: 'QQC.TO', companyName: 'QQC' });
+    expect(r.quality.score).toBeGreaterThan(7.5);
+    expect(r.fit.score).toBeLessThan(r.quality.score);
+  });
+
+  it('ETF observations frame overlap as fit, not fund quality', () => {
+    const r = reviewHolding({
+      ...base, ticker: 'QQC.TO', companyName: 'QQC',
+      directlyHeldBases: new Set(['MSFT', 'AAPL', 'NVDA', 'AMZN', 'META']),
+    });
+    const { cons } = buildObservations(r, {
+      sectorLabel: 'Growth / Nasdaq ETF', rsVsSector1M: null, pnlPct: -2.4,
+      combinedExposurePct: 10.4, sectorPressure: -17,
+    });
+    expect(cons.join(' ')).toMatch(/not a fund quality issue/i);
+    expect(cons.join(' ')).not.toMatch(/Down .* in this account/);
   });
 });
