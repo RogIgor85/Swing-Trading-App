@@ -3,6 +3,18 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const MODULES = 'financialData,defaultKeyStatistics,summaryDetail,calendarEvents,price';
 
+// Yahoo's v8 spark endpoint returns HTTP 400 for more than 20 symbols in one
+// request. Verified by bisection: 20 succeeds, 21 fails. Exceeding it used to
+// blank breadth for every sector at once, so requests are chunked.
+export const SPARK_MAX_SYMBOLS = 20;
+
+export function chunkSymbols(syms: string[], size = SPARK_MAX_SYMBOLS): string[][] {
+  if (size < 1) throw new Error('chunk size must be at least 1');
+  const out: string[][] = [];
+  for (let i = 0; i < syms.length; i += size) out.push(syms.slice(i, i + size));
+  return out;
+}
+
 const TSX_SUFFIXES = ['.TO', '.V', '.TSX', '.CN', '.NEO', '.VN'];
 function isTSX(ticker: string) {
   return TSX_SUFFIXES.some((s) => ticker.toUpperCase().endsWith(s));
@@ -274,30 +286,49 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.query.spark === '1' && typeof req.query.tickers === 'string') {
     try {
       const syms = req.query.tickers.toUpperCase().split(',').map(s => s.trim()).filter(Boolean).slice(0, 200);
-      const r = await fetch(
-        `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(syms.join(','))}&range=1y&interval=1d`,
-        { headers: { 'User-Agent': UA, Accept: 'application/json' } }
-      );
-      if (!r.ok) return res.status(200).json({ series: [] });
-      const j: any = await r.json();
+
+      // Asking for all ~165 sector constituents in one request returned an empty
+      // set, which silently blanked breadth for every sector — so chunk.
+      const chunks = chunkSymbols(syms);
+
       const series: Array<{ symbol: string; closes: number[] }> = [];
       const push = (symbol: string, closesRaw: (number | null)[] | undefined) => {
-        if (!Array.isArray(closesRaw)) return;
+        if (!symbol || !Array.isArray(closesRaw)) return;
         const closes = closesRaw
           .filter((c): c is number => c != null && typeof c === 'number')
           .slice(-240)
           .map(c => Math.round(c * 100) / 100);
         if (closes.length >= 30) series.push({ symbol, closes });
       };
-      const results = j?.spark?.result;
-      if (Array.isArray(results)) {
-        for (const row of results) {
-          push(row?.symbol, row?.response?.[0]?.indicators?.quote?.[0]?.close);
+
+      const fetchChunk = async (group: string[]) => {
+        const r = await fetch(
+          `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(group.join(','))}&range=1y&interval=1d`,
+          { headers: { 'User-Agent': UA, Accept: 'application/json' } }
+        );
+        if (!r.ok) return;   // one bad chunk must not blank the whole set
+        const j: any = await r.json();
+        const results = j?.spark?.result;
+        if (Array.isArray(results)) {
+          for (const row of results) push(row?.symbol, row?.response?.[0]?.indicators?.quote?.[0]?.close);
+        } else if (j && typeof j === 'object') {
+          // legacy shape: { "AAPL": { close: [...] }, ... }
+          for (const [sym, v] of Object.entries<any>(j)) push(v?.symbol ?? sym, v?.close);
         }
-      } else if (j && typeof j === 'object') {
-        // legacy shape: { "AAPL": { close: [...] }, ... }
-        for (const [sym, v] of Object.entries<any>(j)) push(sym, v?.close);
-      }
+      };
+
+      // Bounded concurrency — enough to stay well inside the function timeout
+      // without hammering Yahoo hard enough to get rate-limited.
+      const LANES = 3;
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(LANES, chunks.length) }, async () => {
+        for (;;) {
+          const i = next++;
+          if (i >= chunks.length) return;
+          try { await fetchChunk(chunks[i]); } catch { /* skip this chunk */ }
+        }
+      }));
+
       res.setHeader('Cache-Control', 's-maxage=900, stale-while-revalidate=3600');
       return res.status(200).json({ series });
     } catch {

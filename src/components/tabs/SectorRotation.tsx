@@ -156,6 +156,23 @@ export default function SectorRotation() {
   const [fltAccel, setFltAccel]           = useState(false);
   const [fltBreadth, setFltBreadth]       = useState(false);
   const [fltAbove50, setFltAbove50]       = useState(false);
+
+  // Optional column groups — off by default so the table fits without scrolling
+  const COLS_KEY = 'swing_sector_table_cols';
+  const [colGroups, setColGroups] = useState<{ extRet: boolean; extRs: boolean }>(() => {
+    try {
+      const raw = localStorage.getItem(COLS_KEY);
+      if (raw) { const p = JSON.parse(raw); return { extRet: !!p.extRet, extRs: !!p.extRs }; }
+    } catch { /* fall through to defaults */ }
+    return { extRet: false, extRs: false };
+  });
+  function toggleColGroup(g: 'extRet' | 'extRs') {
+    setColGroups(prev => {
+      const next = { ...prev, [g]: !prev[g] };
+      try { localStorage.setItem(COLS_KEY, JSON.stringify(next)); } catch { /* ignore quota */ }
+      return next;
+    });
+  }
   const [changeTf, setChangeTf]     = useState<'d1' | 'd5' | 'd20'>('d5');
 
   // Shared selected-sector state — every section reads/writes this one value
@@ -267,6 +284,99 @@ export default function SectorRotation() {
     });
     return rows;
   }, [metrics, classFilter, fltOutperform, fltAccel, fltBreadth, fltAbove50, sortKey, sortDir]);
+
+  // ── Table columns ─────────────────────────────────────────────────────────
+  // Built from a descriptor list so the table can fit without horizontal
+  // scrolling: optional groups are off by default, and any column with no data
+  // in ANY visible row is dropped entirely rather than showing a wall of "—".
+  interface Col {
+    key: string;
+    label: string;
+    sort?: SortKey;
+    group?: 'extRet' | 'extRs';
+    title?: string;
+    has: (m: SectorMetrics) => boolean;
+    cell: (m: SectorMetrics) => React.ReactNode;
+    cls?: (m: SectorMetrics) => string;
+  }
+
+  const allCols: Col[] = [
+    { key: 'ret1D', label: '1D', sort: 'ret1D',
+      has: m => m.ret['1D'] != null, cell: m => fmtPctS(m.ret['1D']), cls: m => pctColor(m.ret['1D']) },
+    { key: 'ret5D', label: '5D', sort: 'ret5D',
+      has: m => m.ret['5D'] != null, cell: m => fmtPctS(m.ret['5D']), cls: m => pctColor(m.ret['5D']) },
+    { key: 'ret1M', label: '1M', sort: 'ret1M',
+      has: m => m.ret['1M'] != null, cell: m => fmtPctS(m.ret['1M']), cls: m => pctColor(m.ret['1M']) },
+    { key: 'ret3M', label: '3M', sort: 'ret3M',
+      has: m => m.ret['3M'] != null, cell: m => fmtPctS(m.ret['3M']), cls: m => pctColor(m.ret['3M']) },
+    { key: 'ret6M', label: '6M', sort: 'ret6M', group: 'extRet',
+      has: m => m.ret['6M'] != null, cell: m => fmtPctS(m.ret['6M']), cls: m => pctColor(m.ret['6M']) },
+
+    { key: 'rs5D', label: 'vs SPY 5D', sort: 'rs5D', group: 'extRs',
+      has: m => m.rs['5D'] != null, cell: m => fmtPctS(m.rs['5D']), cls: m => pctColor(m.rs['5D']) },
+    { key: 'rs1M', label: 'vs SPY 1M', sort: 'rs1M',
+      has: m => m.rs['1M'] != null, cell: m => fmtPctS(m.rs['1M']), cls: m => pctColor(m.rs['1M']) },
+    { key: 'rs3M', label: 'vs SPY 3M', sort: 'rs3M', group: 'extRs',
+      has: m => m.rs['3M'] != null, cell: m => fmtPctS(m.rs['3M']), cls: m => pctColor(m.rs['3M']) },
+
+    // Breadth and its 5-day change share one cell — they are one idea
+    { key: 'breadth', label: 'Breadth', sort: 'breadth',
+      title: 'Share of the sector\'s tracked constituents in an uptrend, with the 5-day change.',
+      has: m => m.breadth?.score != null,
+      cls: () => 'text-zinc-300',
+      cell: m => m.breadth == null ? '—' : (
+        <span title={breadthTitle(m)} className="cursor-help">
+          {m.breadth.score}
+          {m.breadth.change != null && (
+            <span className={m.breadth.change >= 0 ? 'text-emerald-500' : 'text-red-500'}>
+              {' '}({signedInt(m.breadth.change)})
+            </span>
+          )}
+        </span>
+      ) },
+
+    { key: 'volume', label: 'Vol', sort: 'volume',
+      has: m => m.volumeRatio != null, cls: () => 'text-zinc-300',
+      cell: m => m.volumeRatio != null ? `${m.volumeRatio.toFixed(2)}x` : '—' },
+
+    { key: 'pressure', label: 'Pressure', sort: 'pressure', title: PRESSURE_HELP,
+      has: () => true, cls: m => `font-bold ${pressureColor(m.pressure)}`,
+      cell: m => (
+        <span title={describePressure(m.pressure, m.pressureDelta.d5, 'Rotation Pressure')} className="cursor-help">
+          <span className="inline-flex items-center gap-1">{signedInt(m.pressure)} <TrendArrowIcon arrow={m.trendArrow} /></span>
+          {m.pressureDelta.d5 != null && (
+            <div className={`text-[10px] font-medium ${m.pressureDelta.d5 >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+              Δ {signedInt(m.pressureDelta.d5)}
+            </div>
+          )}
+        </span>
+      ) },
+
+    { key: 'score', label: 'Score', sort: 'score',
+      has: () => true, cls: () => 'font-semibold text-zinc-200', cell: m => m.score },
+
+    // Status carries momentum underneath it — both are classifications
+    { key: 'status', label: 'Status', has: () => true, cls: () => '',
+      cell: m => (
+        <div className="flex flex-col items-end gap-0.5">
+          <span className={`text-xs font-bold border rounded px-1.5 py-0.5 ${classColor[m.classification]}`}>{m.classification}</span>
+          <MomentumBadge m={m.momentum} />
+        </div>
+      ) },
+  ];
+
+  const visibleCols = useMemo(
+    () => allCols.filter(c => {
+      if (c.group && !colGroups[c.group]) return false;
+      return tableRows.length === 0 || tableRows.some(c.has);
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tableRows, colGroups],
+  );
+
+  const hiddenEmpty = allCols.filter(
+    c => (!c.group || colGroups[c.group]) && tableRows.length > 0 && !tableRows.some(c.has),
+  );
 
   function toggleSort(k: SortKey) {
     if (sortKey === k) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -597,23 +707,50 @@ export default function SectorRotation() {
                 ))}
               </div>
             </div>
+            {/* Optional column groups — kept off by default so nothing overflows */}
+            <div className="flex items-center gap-2 flex-wrap text-[11px] mb-2">
+              <span className="text-zinc-600">Columns:</span>
+              {([['extRet', '+ 6M return'], ['extRs', '+ vs SPY 5D/3M']] as const).map(([g, label]) => (
+                <button key={g} onClick={() => toggleColGroup(g)}
+                  className={`px-2 py-0.5 rounded border transition-colors ${
+                    colGroups[g]
+                      ? 'border-zinc-600 bg-zinc-800 text-zinc-200'
+                      : 'border-zinc-800 text-zinc-500 hover:border-zinc-700 hover:text-zinc-300'
+                  }`}>
+                  {label}
+                </button>
+              ))}
+              {hiddenEmpty.length > 0 && (
+                <span className="text-zinc-600"
+                      title="These columns had no data for any sector in view, so they are hidden rather than shown as a column of dashes.">
+                  · {hiddenEmpty.map(c => c.label).join(', ')} hidden (no data)
+                </span>
+              )}
+            </div>
+
             <div className="overflow-x-auto">
-              <table className="w-full text-xs">
+              <table className="w-full text-xs table-fixed">
+                <colgroup>
+                  <col className="w-[19%]" />
+                  {visibleCols.map(c => (
+                    <col key={c.key} className={c.key === 'status' ? 'w-[11%]' : c.key === 'pressure' ? 'w-[8%]' : undefined} />
+                  ))}
+                </colgroup>
                 <thead>
                   <tr className="border-b border-zinc-800 bg-zinc-900/40 text-zinc-500">
-                    {([
-                      ['name', 'Sector'], ['ret1D', '1D'], ['ret5D', '5D'], ['ret1M', '1M'], ['ret3M', '3M'], ['ret6M', '6M'],
-                      ['rs5D', 'vs SPY 5D'], ['rs1M', 'vs SPY 1M'], ['rs3M', 'vs SPY 3M'],
-                      ['breadth', 'Breadth'], ['breadthD5', 'Br Δ5D'], ['volume', 'Vol'], ['pressure', 'Pressure'], ['score', 'Score'],
-                    ] as [SortKey, string][]).map(([k, label]) => (
-                      <th key={k} className={`th cursor-pointer select-none whitespace-nowrap ${k === 'name' ? 'text-left' : 'text-right'}`} onClick={() => toggleSort(k)}>
-                        {k === 'pressure'
-                          ? <span title={PRESSURE_HELP}>{label} ⓘ</span>
-                          : label} <SortIcon k={k} />
+                    <th className="th text-left cursor-pointer select-none whitespace-nowrap" onClick={() => toggleSort('name')}>
+                      Sector <SortIcon k="name" />
+                    </th>
+                    {visibleCols.map(c => (
+                      <th key={c.key}
+                          className={`th text-right whitespace-nowrap ${c.sort ? 'cursor-pointer select-none' : ''}`}
+                          onClick={c.sort ? () => toggleSort(c.sort!) : undefined}>
+                        {c.title
+                          ? <span title={c.title} className="cursor-help">{c.label} ⓘ</span>
+                          : c.label}
+                        {c.sort && <> <SortIcon k={c.sort} /></>}
                       </th>
                     ))}
-                    <th className="th text-right">Momentum</th>
-                    <th className="th text-right">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/60">
@@ -622,38 +759,22 @@ export default function SectorRotation() {
                     return (
                       <tr key={m.etf} className={`tr-hover cursor-pointer ${selected ? 'bg-blue-500/5' : ''}`} onClick={() => selectSector(m.etf)}>
                         <td className="td">
-                          <span className={`font-semibold ${selected ? 'text-blue-300' : 'text-zinc-200'}`}>{m.name}</span>
-                          <span className="text-zinc-600 font-mono ml-1.5">{m.etf}</span>
-                          <span className="text-zinc-600 ml-1.5 tabular-nums">${m.price.toFixed(2)}</span>
+                          <div className={`font-semibold truncate ${selected ? 'text-blue-300' : 'text-zinc-200'}`}>{m.name}</div>
+                          <div className="text-zinc-600 text-[10px]">
+                            <span className="font-mono">{m.etf}</span>
+                            <span className="tabular-nums ml-1.5">${m.price.toFixed(2)}</span>
+                          </div>
                         </td>
-                        {(['1D', '5D', '1M', '3M', '6M'] as Timeframe[]).map(t => (
-                          <td key={t} className={`td text-right tabular-nums ${pctColor(m.ret[t])}`}>{fmtPctS(m.ret[t])}</td>
+                        {visibleCols.map(c => (
+                          <td key={c.key} className={`td text-right tabular-nums ${c.cls ? c.cls(m) : ''}`}>
+                            {c.cell(m)}
+                          </td>
                         ))}
-                        {(['5D', '1M', '3M'] as const).map(t => (
-                          <td key={t} className={`td text-right tabular-nums ${pctColor(m.rs[t])}`}>{fmtPctS(m.rs[t])}</td>
-                        ))}
-                        <td className="td text-right tabular-nums text-zinc-300" title={breadthTitle(m)}>{m.breadth?.score ?? <span className="text-zinc-600">unavail.</span>}</td>
-                        <td className={`td text-right tabular-nums ${m.breadth?.change == null ? 'text-zinc-600' : m.breadth.change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {m.breadth?.change != null ? signedInt(m.breadth.change) : '—'}
-                        </td>
-                        <td className="td text-right tabular-nums text-zinc-300">{m.volumeRatio != null ? `${m.volumeRatio.toFixed(2)}x` : 'N/A'}</td>
-                        <td className={`td text-right tabular-nums font-bold ${pressureColor(m.pressure)}`}
-                          title={describePressure(m.pressure, m.pressureDelta.d5, 'Rotation Pressure')}>
-                          <span className="inline-flex items-center gap-1">{signedInt(m.pressure)} <TrendArrowIcon arrow={m.trendArrow} /></span>
-                          {m.pressureDelta.d5 != null && (
-                            <div className={`text-[10px] font-medium ${m.pressureDelta.d5 >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>Δ {signedInt(m.pressureDelta.d5)}</div>
-                          )}
-                        </td>
-                        <td className="td text-right tabular-nums font-semibold text-zinc-200">{m.score}</td>
-                        <td className="td text-right"><MomentumBadge m={m.momentum} /></td>
-                        <td className="td text-right">
-                          <span className={`text-xs font-bold border rounded px-1.5 py-0.5 ${classColor[m.classification]}`}>{m.classification}</span>
-                        </td>
                       </tr>
                     );
                   })}
                   {tableRows.length === 0 && (
-                    <tr><td colSpan={17} className="td text-center text-zinc-600 py-6">No sectors match the current filters</td></tr>
+                    <tr><td colSpan={visibleCols.length + 1} className="td text-center text-zinc-600 py-6">No sectors match the current filters</td></tr>
                   )}
                 </tbody>
               </table>
