@@ -86,6 +86,73 @@ const SORT_COLS: { label: string; key: SortKey }[] = [
   { label: 'Result',     key: 'status'           },
 ];
 
+/**
+ * Inline date cell. Click to edit, Save/Cancel to commit. Used to repair
+ * historical records without opening the full form. Validation happens on save
+ * so an already-invalid record can still be opened and corrected.
+ */
+function EditableDate({
+  value, otherDate, kind, invalid, onSave, allowBlank,
+}: {
+  value: string | null;
+  otherDate: string | null;
+  kind: 'entry' | 'exit';
+  invalid?: boolean;
+  allowBlank?: boolean;
+  onSave: (next: string | null) => Promise<void> | void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value ?? '');
+  const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  function open() { setDraft(value ?? ''); setErr(null); setEditing(true); }
+
+  async function commit() {
+    const next = draft || null;
+    if (!next && !allowBlank) { setErr('Date required'); return; }
+    // Compare against the trade's other date in the correct direction
+    const entry = kind === 'entry' ? next : otherDate;
+    const exit  = kind === 'exit'  ? next : otherDate;
+    if (entry && exit && hasInvalidDates(entry, exit)) {
+      setErr('Exit date cannot be earlier than entry date.');
+      return;
+    }
+    setSaving(true);
+    try { await onSave(next); setEditing(false); } finally { setSaving(false); }
+  }
+
+  if (!editing) {
+    return (
+      <button onClick={open}
+        title={invalid ? 'Exit date occurs before entry date — click to correct' : 'Click to edit'}
+        className={`text-xs hover:underline underline-offset-2 decoration-dotted text-left ${
+          invalid ? 'text-amber-400' : 'text-zinc-400 hover:text-zinc-200'}`}>
+        {value ?? '—'}{invalid && <span className="ml-1">⚠</span>}
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1" onClick={(e) => e.stopPropagation()}>
+      <input type="date" autoFocus value={draft}
+        onChange={(e) => { setDraft(e.target.value); setErr(null); }}
+        onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false); }}
+        className="bg-zinc-800 border border-blue-500 rounded px-1.5 py-0.5 text-xs text-zinc-100 focus:outline-none" />
+      <div className="flex gap-1">
+        <button onClick={commit} disabled={saving}
+          className="text-xs px-1.5 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50">
+          {saving ? '…' : 'Save'}
+        </button>
+        <button onClick={() => setEditing(false)} className="text-xs px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-200">
+          Cancel
+        </button>
+      </div>
+      {err && <span className="text-xs text-red-400 whitespace-nowrap">{err}</span>}
+    </div>
+  );
+}
+
 function SortIcon({ col, sortKey, sortDir }: { col: SortKey; sortKey: SortKey; sortDir: 'asc' | 'desc' }) {
   if (sortKey !== col) return <ChevronsUpDown size={12} className="text-zinc-500 group-hover:text-zinc-300 transition-colors" />;
   return sortDir === 'asc' ? <ChevronUp size={12} className="text-blue-400" /> : <ChevronDown size={12} className="text-blue-400" />;
@@ -113,6 +180,7 @@ export default function TradeJournal() {
   const [chartMode, setChartMode] = useState<'pnl' | 'drawdown'>('pnl');
   const [dateError, setDateError] = useState<string | null>(null);
   const [metaForm, setMetaForm]   = useState<JournalMeta>({});
+  const [showDateRepair, setShowDateRepair] = useState(false);
 
   useEffect(() => { getUsdCad().then(setUsdCad).catch(() => { /* keep cached */ }); }, []);
 
@@ -256,6 +324,16 @@ export default function TradeJournal() {
     } finally {
       setLoading(false);
     }
+  }
+
+  /**
+   * Update a single date field. Deliberately writes ONLY that column — prices,
+   * quantity, P&L, account, strategy and notes are never touched by a date fix.
+   */
+  async function saveDate(t: TradeJournalEntry, field: 'date_of_buy' | 'date_of_sale', next: string | null) {
+    if (field === 'date_of_buy' && !next) return;      // entry date is required
+    await storage.update(TABLE, t.id, { [field]: next });
+    setTrades(prev => prev.map(x => x.id === t.id ? { ...x, [field]: next } : x));
   }
 
   async function handleDelete(id: string) {
@@ -497,8 +575,68 @@ export default function TradeJournal() {
                 {Math.abs(excludedPnl) > 0.01 && <> ({fmtCurrency(excludedPnl)} of realized P&amp;L)</>},
                 but still count in Win Rate, P&amp;L, Profit Factor and account/strategy totals.
               </div>
+              <button
+                onClick={() => setShowDateRepair(v => !v)}
+                className="mt-1 text-xs px-2.5 py-1 rounded-lg bg-amber-900/40 hover:bg-amber-900/60 text-amber-200 border border-amber-800/60 transition-colors">
+                {showDateRepair ? 'Hide' : 'Fix Invalid Dates'}
+              </button>
             </>
           )}
+        </div>
+      )}
+
+      {/* ── Bulk date repair ─────────────────────────────────────────────────── */}
+      {showDateRepair && invalidDateRows.length > 0 && (
+        <div className="card">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-100">Fix Invalid Dates</h2>
+              <p className="text-xs text-zinc-600 mt-0.5">
+                Correct each trade manually — dates are never guessed or swapped for you.
+                Only the date fields are written; prices, quantity and P&amp;L are untouched.
+              </p>
+            </div>
+            <button onClick={() => setShowDateRepair(false)} className="btn-ghost p-1.5"><X size={14} /></button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-zinc-800 bg-zinc-900/40 text-zinc-500">
+                  <th className="th text-left">Ticker</th>
+                  <th className="th text-left">Account</th>
+                  <th className="th text-left">Entry Date</th>
+                  <th className="th text-left">Exit Date</th>
+                  <th className="th text-right">P&amp;L</th>
+                  <th className="th text-left">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/60">
+                {invalidDateRows.map((r) => (
+                  <tr key={r.t.id} className="tr-hover">
+                    <td className="td font-mono text-blue-400">{r.t.ticker}</td>
+                    <td className="td"><span className={accountColors[r.t.account]}>{r.t.account}</span></td>
+                    <td className="td">
+                      <EditableDate value={r.t.date_of_buy} otherDate={r.t.date_of_sale} kind="entry" invalid
+                        onSave={(next) => saveDate(r.t, 'date_of_buy', next)} />
+                    </td>
+                    <td className="td">
+                      <EditableDate value={r.t.date_of_sale} otherDate={r.t.date_of_buy} kind="exit" allowBlank invalid
+                        onSave={(next) => saveDate(r.t, 'date_of_sale', next)} />
+                    </td>
+                    <td className={`td text-right tabular-nums ${r.pnlCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {r.pnlCAD >= 0 ? '+' : ''}{fmtCurrency(r.pnlCAD)}
+                    </td>
+                    <td className="td text-amber-400">⚠ Exit before entry</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-zinc-600 mt-3">
+            Each date saves on its own — fix one field at a time and the warning clears automatically
+            once a trade's dates are in order. All holding-period, monthly and cumulative analytics
+            recalculate immediately.
+          </p>
         </div>
       )}
 
@@ -776,7 +914,12 @@ export default function TradeJournal() {
           </div>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div><label className="label">Date Bought</label><input className="input-base" type="date" value={form.date_of_buy} onChange={(e) => setForm({ ...form, date_of_buy: e.target.value })} /></div>
+              <div>
+                <label className="label">Entry Date</label>
+                <input className={`input-base ${dateError ? 'border-red-500' : ''}`} type="date"
+                  value={form.date_of_buy}
+                  onChange={(e) => { setForm({ ...form, date_of_buy: e.target.value }); setDateError(null); }} />
+              </div>
               <div><label className="label">Ticker *</label><input className="input-base uppercase" placeholder="NVDA" value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value })} required /></div>
               <div><label className="label">Account</label>
                 <select className="select-base" value={form.account} onChange={(e) => setForm({ ...form, account: e.target.value as Account })}>
@@ -902,7 +1045,15 @@ export default function TradeJournal() {
                 {filtered.map((t) => (
                   <tr key={t.id} className={`tr-hover ${t.status === 'OPEN' ? 'bg-blue-950/10' : ''}`}>
                     <td className="td text-zinc-600 text-xs">{t.sr_no}</td>
-                    <td className="td text-zinc-400 text-xs">{t.date_of_buy}</td>
+                    <td className="td text-xs">
+                      <EditableDate
+                        value={t.date_of_buy}
+                        otherDate={t.date_of_sale}
+                        kind="entry"
+                        invalid={rowByTradeId.get(t.id)?.invalidDates}
+                        onSave={(next) => saveDate(t, 'date_of_buy', next)}
+                      />
+                    </td>
                     <td className="td">
                       <button
                         onClick={() => setDrawer({ ticker: t.ticker, currency: t.currency })}
@@ -922,11 +1073,15 @@ export default function TradeJournal() {
                     <td className="td text-xs text-zinc-500">{t.currency}</td>
                     <td className="td tabular-nums text-xs">{fmt(t.qty, 0)}</td>
                     <td className="td tabular-nums">{fmtCurrency(t.entry_price)}</td>
-                    <td className="td text-zinc-400 text-xs">
-                      {t.date_of_sale ?? '—'}
-                      {rowByTradeId.get(t.id)?.invalidDates && (
-                        <span className="text-amber-500 ml-1" title="Exit date is before the entry date — please review">⚠</span>
-                      )}
+                    <td className="td text-xs">
+                      <EditableDate
+                        value={t.date_of_sale}
+                        otherDate={t.date_of_buy}
+                        kind="exit"
+                        allowBlank
+                        invalid={rowByTradeId.get(t.id)?.invalidDates}
+                        onSave={(next) => saveDate(t, 'date_of_sale', next)}
+                      />
                     </td>
                     <td className="td text-zinc-400 text-xs tabular-nums">
                       {(() => {

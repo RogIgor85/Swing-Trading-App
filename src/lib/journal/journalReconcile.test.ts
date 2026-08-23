@@ -186,3 +186,60 @@ describe('coverage-aware insights', () => {
     expect(ins.some(i => /held/i.test(i.label))).toBe(false);
   });
 });
+
+// ── date repair ──────────────────────────────────────────────────────────────
+
+describe('date repair', () => {
+  const broken = trade({
+    ticker: 'XEG.TO', date_of_buy: '2026-04-23', date_of_sale: '2026-04-14',
+    realized_pnl: 250, entry_price: 12, avg_exit_price: 14, exit_price: 14,
+    qty: 100, account: 'TFSA' as Account, strategy: 'Momentum', notes: 'keep me',
+  });
+
+  it('flags the broken record and keeps it out of time-based analytics', () => {
+    const r = rows([broken])[0];
+    expect(r.invalidDates).toBe(true);
+    expect(r.dateValid).toBe(false);
+    expect(r.daysHeld).toBeNull();
+    expect(computeEquityCurve([r])).toHaveLength(0);
+  });
+
+  it('still counts its P&L so unrelated statistics stay correct', () => {
+    const s = computeCoreStats(rows([broken]));
+    expect(s.trades).toBe(1);
+    expect(s.netPnlCAD).toBeCloseTo(250, 4);
+  });
+
+  it('correcting only the exit date clears the warning and restores analytics', () => {
+    // Simulates the inline editor writing ONLY date_of_sale
+    const fixed = { ...broken, date_of_sale: '2026-05-14' };
+    const r = rows([fixed])[0];
+    expect(r.invalidDates).toBe(false);
+    expect(r.dateValid).toBe(true);
+    expect(r.daysHeld).toBe(21);
+    expect(computeEquityCurve([r])).toHaveLength(1);
+    expect(dateCoverage([r])).toEqual({ used: 1, total: 1, excluded: 0 });
+  });
+
+  it('a date-only edit leaves every other field untouched', () => {
+    const fixed = { ...broken, date_of_sale: '2026-05-14' };
+    for (const k of ['ticker', 'qty', 'entry_price', 'avg_exit_price', 'realized_pnl',
+                     'account', 'strategy', 'notes', 'currency'] as const) {
+      expect(fixed[k]).toEqual(broken[k]);
+    }
+    expect(rows([fixed])[0].pnlCAD).toBeCloseTo(rows([broken])[0].pnlCAD, 6);
+  });
+
+  it('correcting the entry date instead also works', () => {
+    const fixed = { ...broken, date_of_buy: '2026-04-01' };
+    const r = rows([fixed])[0];
+    expect(r.dateValid).toBe(true);
+    expect(r.daysHeld).toBe(13);
+  });
+
+  it('an open trade with no exit date is not treated as invalid', () => {
+    const open = trade({ status: 'OPEN', date_of_sale: null, realized_pnl: null, win_loss: null });
+    const r = rows([open])[0];
+    expect(r.invalidDates).toBe(false);
+  });
+});
