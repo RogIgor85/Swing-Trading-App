@@ -3,6 +3,15 @@ import { Search, Star, Pencil, Check, X, AlertTriangle, TrendingUp, TrendingDown
 import { finnhub } from '../../lib/finnhub';
 import { fetchYahoo } from '../../lib/yahoo';
 import { runTriFrame, loadSettings, saveSettings } from '../../lib/scoring';
+import { runScorecard } from '../../lib/scorecard/scoreEngine';
+import type { DimensionScore, ScorecardResult } from '../../lib/scorecard/scoreEngine';
+import {
+  buildQualityInputs, buildValuationInputs, buildTechnicalInputs,
+  buildAlignmentInputs, fetchSectorContext,
+} from '../../lib/scorecard/scorecardInputs';
+import type { SectorContext } from '../../lib/scorecard/scorecardInputs';
+import { DIMENSION_HELP, HORIZON_LABELS } from '../../config/scorecardConfig';
+import { readAccountSnapshot, snapshotAgeLabel } from '../../lib/portfolio/accountSnapshot';
 import { storage, newId, nowIso } from '../../lib/storage';
 import { fmtCurrency, fmt } from '../../lib/utils';
 import type { TriFrameResult, SwingScore, MediumScore, LongScore, FlagSeverity } from '../../types/scorecard';
@@ -143,6 +152,104 @@ function ScoreBar({ label, score, weight }: { label: string; score: number; weig
       </div>
       <span className="w-8 text-right tabular-nums text-zinc-300">{score.toFixed(1)}</span>
       <span className="w-8 text-right tabular-nums text-zinc-600">{(weight * 100).toFixed(0)}%</span>
+    </div>
+  );
+}
+
+// ─── Four-dimension scoring ────────────────────────────────────────────────────
+
+function scoreColor(s: number | null): string {
+  if (s == null) return 'text-zinc-600';
+  return s >= 8 ? 'text-emerald-400' : s >= 6.5 ? 'text-emerald-500'
+    : s >= 5 ? 'text-amber-400' : s >= 3.5 ? 'text-orange-400' : 'text-red-400';
+}
+function scoreBg(s: number | null): string {
+  if (s == null) return 'bg-zinc-700';
+  return s >= 8 ? 'bg-emerald-400' : s >= 6.5 ? 'bg-emerald-500'
+    : s >= 5 ? 'bg-amber-400' : s >= 3.5 ? 'bg-orange-400' : 'bg-red-400';
+}
+const CONFIDENCE_STYLE: Record<string, string> = {
+  HIGH:     'text-zinc-500 border-zinc-700',
+  MODERATE: 'text-amber-500/80 border-amber-800/60',
+  LOW:      'text-amber-400 border-amber-700 bg-amber-950/30',
+};
+
+/** One of the four dimensions, with its component breakdown and coverage. */
+function DimensionCard({ dim, title, help, accent }: {
+  dim: DimensionScore; title: string; help: string; accent: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="flex-1 min-w-56 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 flex flex-col gap-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className={`text-[11px] font-semibold uppercase tracking-wide ${accent}`}>{title}</span>
+            <span title={help} className="text-zinc-600 hover:text-zinc-400 cursor-help leading-none">ⓘ</span>
+          </div>
+          <div className="text-[10px] text-zinc-500 mt-0.5 truncate">{dim.label}</div>
+        </div>
+        <div className={`text-2xl font-bold tabular-nums leading-none ${scoreColor(dim.score)}`}>
+          {dim.score == null ? '—' : dim.score.toFixed(1)}
+        </div>
+      </div>
+
+      <div className="bg-zinc-800 rounded-full h-1.5">
+        <div className={`h-1.5 rounded-full ${scoreBg(dim.score)}`}
+             style={{ width: `${(dim.score ?? 0) * 10}%` }} />
+      </div>
+
+      <div className="flex items-center justify-between text-[10px]">
+        <span
+          title={DIMENSION_HELP.coverage}
+          className={`px-1.5 py-0.5 rounded border cursor-help ${CONFIDENCE_STYLE[dim.confidence]}`}>
+          {dim.confidence === 'LOW' ? 'LOW DATA CONFIDENCE' : `${dim.confidence} CONFIDENCE`}
+        </span>
+        <button onClick={() => setOpen(o => !o)} className="text-zinc-500 hover:text-zinc-300">
+          {dim.available}/{dim.total} inputs · {dim.coverage}% {open ? '▲' : '▼'}
+        </button>
+      </div>
+
+      {open && (
+        <div className="space-y-1.5 pt-1 border-t border-zinc-800">
+          {dim.components.map((c, i) => (
+            <div key={i} className="flex items-center gap-2 text-[11px]">
+              <span className={`w-28 truncate ${c.score == null ? 'text-zinc-600' : 'text-zinc-400'}`}>{c.label}</span>
+              <div className="flex-1 bg-zinc-800 rounded-full h-1">
+                {c.score != null && (
+                  <div className={`h-1 rounded-full ${scoreBg(c.score)}`} style={{ width: `${c.score * 10}%` }} />
+                )}
+              </div>
+              <span className={`w-7 text-right tabular-nums ${c.score == null ? 'text-zinc-600' : 'text-zinc-300'}`}>
+                {c.score == null ? '—' : c.score.toFixed(1)}
+              </span>
+              <span className="w-24 text-right text-zinc-600 truncate" title={c.display}>{c.display}</span>
+            </div>
+          ))}
+          <p className="text-[10px] text-zinc-600 pt-1">
+            Unavailable inputs are excluded and the remaining weights renormalised — never scored 5.0.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Positive / negative drivers behind one horizon score. */
+function Drivers({ positives, negatives }: { positives: string[]; negatives: string[] }) {
+  if (!positives.length && !negatives.length) return null;
+  return (
+    <div className="space-y-1 pt-2 border-t border-zinc-800">
+      {positives.map((p, i) => (
+        <div key={`p${i}`} className="text-[11px] text-emerald-500/90 flex gap-1.5">
+          <span className="flex-shrink-0">▲</span><span>{p}</span>
+        </div>
+      ))}
+      {negatives.map((n, i) => (
+        <div key={`n${i}`} className="text-[11px] text-red-400/80 flex gap-1.5">
+          <span className="flex-shrink-0">▼</span><span>{n}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -362,6 +469,11 @@ export default function TriFrameScorecard() {
   const [headerEntry,  setHeaderEntry]  = useState('');
   const [headerExit,   setHeaderExit]   = useState('');
 
+  // Four-dimension scorecard (separate from the legacy tri-frame result)
+  const [scorecard, setScorecard] = useState<ScorecardResult | null>(null);
+  const [sectorCtx, setSectorCtx] = useState<SectorContext | null>(null);
+  const rawRef = useRef<{ ticker: string; quote: any; yahoo: any; metrics: any; sentiment: any } | null>(null);
+
   // Supplemental data
   const [newsData,    setNewsData]    = useState<Array<{headline:string;source:string;datetime:number;url:string;summary:string}>>([]);
   const [epsEstData,  setEpsEstData]  = useState<Array<{epsAvg:number;period:string;year:number}>>([]);
@@ -381,6 +493,17 @@ export default function TriFrameScorecard() {
   const [accountInput, setAccountInput] = useState('');
   const accountRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (editingAccount) accountRef.current?.focus(); }, [editingAccount]);
+
+  // Real balances published by Portfolio — re-read on mount so a fresh
+  // Portfolio load is picked up when the user switches back to this tab.
+  const [snapshot, setSnapshot] = useState(() => readAccountSnapshot());
+  useEffect(() => { setSnapshot(readAccountSnapshot()); }, []);
+
+  function applyAccountSize(v: number) {
+    setAccountSize(v);
+    saveSettings({ accountSize: v });
+    setEditingAccount(false);
+  }
 
   // ── Thesis notes helpers ──────────────────────────────────────────────────
   async function loadNotes(ticker: string) {
@@ -500,6 +623,20 @@ export default function TriFrameScorecard() {
 
       const res = runTriFrame(t, quote, profile, metrics, sentiment, yahoo, accountSize);
       setResult(res);
+
+      // Four-dimension scorecard. Sector rotation isn't loaded yet, so Market
+      // Alignment starts without it and is recomputed below once it arrives —
+      // it is left unavailable rather than filled with a neutral value.
+      rawRef.current = { ticker: t, quote, yahoo, metrics, sentiment };
+      setSectorCtx(null);
+      setScorecard(runScorecard({
+        ticker: t,
+        quality:   buildQualityInputs(yahoo, metrics),
+        valuation: buildValuationInputs(yahoo, metrics),
+        technical: buildTechnicalInputs(quote, yahoo, metrics),
+        alignment: buildAlignmentInputs(metrics, sentiment, null, null),
+      }));
+
       setYahooData(yahoo);
       setFinnhubMetrics(metrics);
       setFinnhubEarnings(earningsHist);
@@ -521,6 +658,25 @@ export default function TriFrameScorecard() {
         if (epsR.status  === 'fulfilled') setEpsEstData(epsR.value?.data?.slice(0, 4) ?? []);
         if (revR.status  === 'fulfilled') setRevEstData(revR.value?.data?.slice(0, 4) ?? []);
       })();
+
+      // Sector rotation loads separately — it drives Market Alignment only.
+      // Company Quality and Valuation are untouched by it and never re-scored.
+      void (async () => {
+        try {
+          const ctx = await fetchSectorContext(t, profile?.finnhubIndustry);
+          const raw = rawRef.current;
+          if (!ctx || !raw || raw.ticker !== t) return;
+          setSectorCtx(ctx);
+          setScorecard(runScorecard({
+            ticker: t,
+            quality:   buildQualityInputs(raw.yahoo, raw.metrics),
+            valuation: buildValuationInputs(raw.yahoo, raw.metrics),
+            technical: buildTechnicalInputs(raw.quote, raw.yahoo, raw.metrics),
+            alignment: buildAlignmentInputs(raw.metrics, raw.sentiment, ctx.pressure, ctx.ret1M),
+          }));
+        } catch { /* rotation is optional — alignment simply stays partial */ }
+      })();
+
       void loadNotes(t);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unexpected error — check console.');
@@ -607,10 +763,60 @@ export default function TriFrameScorecard() {
           </div>
         </div>
 
+        {/* Real account balances published by the Portfolio tab */}
+        {snapshot && (
+          <div className="mt-3 pt-3 border-t border-zinc-800">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs text-zinc-500">Use a real account balance:</span>
+              <span className="text-[10px] text-zinc-600">
+                from Portfolio, {snapshotAgeLabel(snapshot)}
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(snapshot.byAccount)
+                .filter(([, v]) => v > 0)
+                .sort((a, b) => b[1] - a[1])
+                .map(([name, value]) => (
+                  <button
+                    key={name}
+                    onClick={() => applyAccountSize(Math.round(value))}
+                    className={`px-2.5 py-1.5 rounded border text-xs transition-colors ${
+                      Math.round(value) === accountSize
+                        ? 'border-blue-500 bg-blue-950/40 text-blue-300'
+                        : 'border-zinc-700 bg-zinc-800 text-zinc-400 hover:border-zinc-500'
+                    }`}
+                  >
+                    {name} <span className="font-mono tabular-nums ml-1">
+                      ${Math.round(value).toLocaleString()}
+                    </span>
+                  </button>
+                ))}
+              <button
+                onClick={() => applyAccountSize(Math.round(snapshot.totalCAD))}
+                className={`px-2.5 py-1.5 rounded border text-xs transition-colors ${
+                  Math.round(snapshot.totalCAD) === accountSize
+                    ? 'border-blue-500 bg-blue-950/40 text-blue-300'
+                    : 'border-zinc-700 bg-zinc-800 text-zinc-400 hover:border-zinc-500'
+                }`}
+              >
+                All accounts <span className="font-mono tabular-nums ml-1">
+                  ${Math.round(snapshot.totalCAD).toLocaleString()}
+                </span>
+              </button>
+            </div>
+            <p className="text-[10px] text-zinc-600 mt-1.5">
+              Values are CAD market value. Sizing a USD trade against a CAD balance
+              overstates the share count — convert first if the ticker trades in USD.
+            </p>
+          </div>
+        )}
+
         {accountSize === 0 && (
           <p className="text-xs text-amber-600/80 mt-2 flex items-center gap-1.5">
             <AlertTriangle size={11} />
-            Set your swing account size to enable position sizing calculations.
+            {snapshot
+              ? 'Pick an account above, or type a size, to enable position sizing.'
+              : 'Set your swing account size to enable position sizing calculations. Open the Portfolio tab once to pull real account balances here.'}
           </p>
         )}
       </div>
@@ -759,6 +965,145 @@ export default function TriFrameScorecard() {
             })()}
           </div>
 
+          {/* Four independent dimensions — scored before any horizon blend */}
+          {scorecard && (
+            <div className="card">
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-100">What This Stock Is</h3>
+                  <p className="text-xs text-zinc-500 mt-0.5">
+                    Four separate questions. A great business can have a poor entry — these are
+                    measured independently and never averaged into one verdict.
+                  </p>
+                </div>
+                {sectorCtx && (
+                  <div className="text-right flex-shrink-0">
+                    <div className="text-[10px] text-zinc-500 uppercase tracking-wide">Sector</div>
+                    <div className="text-xs text-zinc-300">{sectorCtx.name} ({sectorCtx.etf})</div>
+                    <div className={`text-xs tabular-nums ${sectorCtx.pressure >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      pressure {sectorCtx.pressure >= 0 ? '+' : ''}{sectorCtx.pressure}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <DimensionCard dim={scorecard.dimensions.companyQuality}
+                  title="Company Quality" accent="text-emerald-400" help={DIMENSION_HELP.companyQuality} />
+                <DimensionCard dim={scorecard.dimensions.valuation}
+                  title="Valuation" accent="text-sky-400" help={DIMENSION_HELP.valuation} />
+                <DimensionCard dim={scorecard.dimensions.technicalSetup}
+                  title="Technical Setup" accent="text-blue-400" help={DIMENSION_HELP.technicalSetup} />
+                <DimensionCard dim={scorecard.dimensions.marketAlignment}
+                  title="Market Alignment" accent="text-purple-400" help={DIMENSION_HELP.marketAlignment} />
+              </div>
+
+              {scorecard.overallCoverage < 80 && (
+                <div className="mt-3 text-xs text-amber-500/90 flex items-start gap-1.5">
+                  <AlertTriangle size={11} className="mt-0.5 flex-shrink-0" />
+                  <span>
+                    Overall data coverage {scorecard.overallCoverage}%. Scores are computed from the inputs that
+                    exist and the remaining weights renormalised — missing data lowers confidence, not the score.
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Horizon scores built from those four dimensions */}
+          {scorecard && (
+            <div className="card">
+              <h3 className="text-sm font-semibold text-zinc-100 mb-1">Opportunity by Horizon</h3>
+              <p className="text-xs text-zinc-500 mb-3">
+                The same four dimensions, weighted differently for each holding period.
+              </p>
+              <div className="flex flex-col lg:flex-row gap-3">
+                {(['swing', 'medium', 'long'] as const).map(key => {
+                  const h = scorecard.horizons[key];
+                  const meta = HORIZON_LABELS[key];
+                  const best = scorecard.bestFit.key === key;
+                  return (
+                    <div key={key} className={`flex-1 min-w-64 rounded-xl border p-4 flex flex-col gap-2 ${
+                      best ? 'border-zinc-500 bg-zinc-900' : 'border-zinc-800 bg-zinc-900/50'
+                    }`}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="text-xs font-semibold text-zinc-200">{meta.title}</div>
+                          <div className="text-[10px] text-zinc-500">{meta.window}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`text-2xl font-bold tabular-nums leading-none ${scoreColor(h.score)}`}>
+                            {h.score == null ? '—' : h.score.toFixed(1)}
+                          </div>
+                          <div className="text-[10px] text-zinc-500 mt-0.5">{h.label}</div>
+                        </div>
+                      </div>
+                      <div className="bg-zinc-800 rounded-full h-1.5">
+                        <div className={`h-1.5 rounded-full ${scoreBg(h.score)}`} style={{ width: `${(h.score ?? 0) * 10}%` }} />
+                      </div>
+                      <div className="space-y-0.5">
+                        {h.contributions.map((c, i) => (
+                          <div key={i} className="flex items-center justify-between text-[10px]">
+                            <span className={c.score == null ? 'text-zinc-600' : 'text-zinc-500'}>
+                              {c.label} <span className="text-zinc-700">{c.weight}%</span>
+                            </span>
+                            <span className={`tabular-nums ${c.score == null ? 'text-zinc-600' : 'text-zinc-400'}`}>
+                              {c.score == null ? 'excluded' : c.score.toFixed(1)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      <Drivers positives={h.positives} negatives={h.negatives} />
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Best fit, explained */}
+              {scorecard.bestFit.key && (
+                <div className="mt-3 rounded-lg border border-zinc-700 bg-zinc-800/40 p-3 flex items-start gap-2">
+                  <Star size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <div className="text-xs font-semibold text-zinc-100 mb-0.5">
+                      Best Fit: {HORIZON_LABELS[scorecard.bestFit.key].title} ({HORIZON_LABELS[scorecard.bestFit.key].window})
+                    </div>
+                    <div className="text-xs text-zinc-400">{scorecard.bestFit.reason}</div>
+                  </div>
+                </div>
+              )}
+
+              {/* What would move the score */}
+              {(scorecard.levers.improve.length > 0 || scorecard.levers.weaken.length > 0) && (
+                <div className="mt-3 grid md:grid-cols-2 gap-3">
+                  {scorecard.levers.improve.length > 0 && (
+                    <div className="rounded-lg border border-emerald-900/60 bg-emerald-950/20 p-3">
+                      <div className="text-xs font-semibold text-emerald-400 mb-1.5">What Would Improve the Setup</div>
+                      <ul className="space-y-1">
+                        {scorecard.levers.improve.map((x, i) => (
+                          <li key={i} className="text-xs text-zinc-400 flex gap-1.5">
+                            <span className="text-emerald-600 flex-shrink-0">→</span><span>{x}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {scorecard.levers.weaken.length > 0 && (
+                    <div className="rounded-lg border border-red-900/60 bg-red-950/20 p-3">
+                      <div className="text-xs font-semibold text-red-400 mb-1.5">What Would Weaken It</div>
+                      <ul className="space-y-1">
+                        {scorecard.levers.weaken.map((x, i) => (
+                          <li key={i} className="text-xs text-zinc-400 flex gap-1.5">
+                            <span className="text-red-700 flex-shrink-0">→</span><span>{x}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* 3 cards */}
           <div className="flex flex-col lg:flex-row gap-4">
             <SwingCard  s={result.swing}  isBest={bf === 'SWING'} />
@@ -789,35 +1134,23 @@ export default function TriFrameScorecard() {
               <h3 className="text-sm font-semibold text-zinc-100 mb-3 flex items-center gap-2">
                 <AlertTriangle size={14} className="text-amber-400" /> Risk Flags
               </h3>
-              <div className="flex flex-col lg:flex-row gap-6">
-                {/* Flag chips */}
-                <div className="flex flex-wrap gap-3 content-start">
-                  {result.riskFlags.map((f, i) => (
-                    <div key={i} className="bg-zinc-800 rounded-lg px-3 py-2 flex flex-col gap-0.5">
-                      <span className="text-xs text-zinc-500">{f.label}</span>
+              {/* Definitions live in tooltips — the values are what matter at a glance */}
+              <div className="flex flex-wrap gap-3">
+                {result.riskFlags.map((f, i) => {
+                  const def = FLAG_DEFINITIONS[f.label];
+                  const tip = def ? `${f.label}\n${def.summary}\n\n${def.bullets.join('\n')}` : f.label;
+                  return (
+                    <div key={i} title={tip}
+                         className="bg-zinc-800 rounded-lg px-3 py-2 flex flex-col gap-0.5 cursor-help hover:bg-zinc-750 border border-transparent hover:border-zinc-700">
+                      <span className="text-xs text-zinc-500 flex items-center gap-1">
+                        {f.label}{def && <span className="text-zinc-600">ⓘ</span>}
+                      </span>
                       <span className={`text-sm font-semibold tabular-nums ${FLAG_SEVERITY[f.severity]}`}>{f.value}</span>
                     </div>
-                  ))}
-                </div>
-
-                {/* Definitions panel */}
-                <div className="lg:border-l lg:border-zinc-800 lg:pl-6 space-y-4 flex-1 min-w-0">
-                  {Object.entries(FLAG_DEFINITIONS).map(([label, { summary, bullets }]) => (
-                    <div key={label}>
-                      <div className="text-xs font-semibold text-zinc-200 mb-0.5">{label}</div>
-                      <p className="text-xs text-zinc-500 mb-1">{summary}</p>
-                      <ul className="space-y-0.5">
-                        {bullets.map((b, i) => (
-                          <li key={i} className="text-xs text-zinc-500 flex gap-1.5">
-                            <span className="text-zinc-600 flex-shrink-0">→</span>
-                            <span>{b}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
+              <p className="text-[11px] text-zinc-600 mt-2">Hover any flag for how to read it.</p>
             </div>
           )}
 

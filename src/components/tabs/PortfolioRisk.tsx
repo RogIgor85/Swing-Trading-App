@@ -11,6 +11,7 @@ import {
   computeConcentration, computeRotationExposure, validateTotals, accountTotalsOf,
 } from '../../lib/portfolio/portfolioEngine';
 import type { EnrichedHolding } from '../../lib/portfolio/portfolioEngine';
+import { publishAccountSnapshot } from '../../lib/portfolio/accountSnapshot';
 import { computeCorrelationMatrix, averageCorrelation } from '../../lib/portfolio/correlation';
 import { CORRELATION_SETTINGS, ROTATION_EXPOSURE_HELP, HOLDING_STATUS_STYLE, UNCLASSIFIED_LABEL, SECTOR_NAME_BY_ETF } from '../../config/portfolioConfig';
 import { resolveSectors } from '../../lib/watch/watchSectorContext';
@@ -488,6 +489,14 @@ export default function PortfolioRisk() {
 
   const engineByTicker = useMemo(
     () => new Map(engineRows.map(r => [r.ticker, r])), [engineRows]);
+
+  // Publish account balances so Scorecard position sizing uses real values.
+  // Only once prices have actually loaded — otherwise we'd broadcast zeros.
+  useEffect(() => {
+    if (engineRows.length === 0) return;
+    if (!engineRows.some(r => r.marketValueCAD > 0)) return;
+    publishAccountSnapshot(accountTotalsOf(engineRows));
+  }, [engineRows]);
 
   // Compatibility view — keeps the existing table markup working while
   // exposing the full engine row as `_e` for the new columns.
