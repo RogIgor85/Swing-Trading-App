@@ -26,12 +26,28 @@ export type FollowedPlan = typeof FOLLOWED_PLAN_OPTIONS[number];
 
 /** Holding-period buckets, in calendar days. */
 export const HOLDING_BUCKETS: Array<{ label: string; min: number; max: number }> = [
-  { label: 'Same Day',   min: 0,  max: 0 },
-  { label: '1–5 Days',   min: 1,  max: 5 },
-  { label: '6–20 Days',  min: 6,  max: 20 },
-  { label: '21–60 Days', min: 21, max: 60 },
-  { label: '60+ Days',   min: 61, max: Infinity },
+  { label: 'Same Day',    min: 0,  max: 0 },
+  { label: '1–5 Days',    min: 1,  max: 5 },
+  { label: '6–15 Days',   min: 6,  max: 15 },
+  { label: '16–30 Days',  min: 16, max: 30 },
+  { label: '31–60 Days',  min: 31, max: 60 },
+  { label: '60+ Days',    min: 61, max: Infinity },
 ];
+
+/**
+ * Expected holding window per strategy tag, used only to FLAG a mismatch —
+ * strategy tags are user-set and are never rewritten from actual hold time.
+ */
+export const STRATEGY_DURATIONS: Record<string, { minDays: number; maxDays: number }> = {
+  'Swing 1-15 days':  { minDays: 0,   maxDays: 15 },
+  'Short < 6 months': { minDays: 0,   maxDays: 182 },
+  'Long 1+ Year':     { minDays: 365, maxDays: Infinity },
+  'Core (Forever)':   { minDays: 365, maxDays: Infinity },
+  'Momentum':         { minDays: 0,   maxDays: 60 },
+  'Breakout':         { minDays: 0,   maxDays: 60 },
+  'Pullback':         { minDays: 0,   maxDays: 60 },
+  'Lotto':            { minDays: 0,   maxDays: 30 },
+};
 
 /** Rotation context buckets, from the sector snapshot stored at entry. */
 export const ROTATION_CONTEXTS = [

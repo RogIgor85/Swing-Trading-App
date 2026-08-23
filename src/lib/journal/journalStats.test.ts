@@ -149,8 +149,9 @@ describe('dates and holding period', () => {
   it('buckets holding periods', () => {
     expect(holdingBucketOf(0)).toBe('Same Day');
     expect(holdingBucketOf(3)).toBe('1–5 Days');
-    expect(holdingBucketOf(17)).toBe('6–20 Days');
-    expect(holdingBucketOf(45)).toBe('21–60 Days');
+    expect(holdingBucketOf(10)).toBe('6–15 Days');
+    expect(holdingBucketOf(17)).toBe('16–30 Days');
+    expect(holdingBucketOf(45)).toBe('31–60 Days');
     expect(holdingBucketOf(200)).toBe('60+ Days');
     expect(holdingBucketOf(null)).toBeNull();
   });
@@ -160,10 +161,12 @@ describe('dates and holding period', () => {
 
 describe('best and worst trades', () => {
   it('does not assume the biggest dollar winner is the biggest percentage winner', () => {
+    // P&L % is derived from prices, so the fixture sets real entry/exit prices:
+    // BIG is the largest dollar winner at +20%; PCT is the largest percent winner.
     const e = computeExtremes(rows([
-      trade({ ticker: 'BIG', realized_pnl: 55625, realized_pnl_pct: 20 }),
-      trade({ ticker: 'PCT', realized_pnl: 900, realized_pnl_pct: 90.95 }),
-      trade({ ticker: 'BAD', realized_pnl: -4000, realized_pnl_pct: -12, win_loss: 'LOSS' }),
+      trade({ ticker: 'BIG', realized_pnl: 55625, entry_price: 100, avg_exit_price: 120, exit_price: 120 }),
+      trade({ ticker: 'PCT', realized_pnl: 900, entry_price: 10, avg_exit_price: 19.095, exit_price: 19.095 }),
+      trade({ ticker: 'BAD', realized_pnl: -4000, entry_price: 100, avg_exit_price: 88, exit_price: 88, win_loss: 'LOSS' }),
     ]));
     expect(e.bestByDollar!.t.ticker).toBe('BIG');
     expect(e.bestByPct!.t.ticker).toBe('PCT');

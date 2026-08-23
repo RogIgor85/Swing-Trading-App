@@ -11,16 +11,20 @@
 // but remain in the rate denominators.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { HOLDING_BUCKETS } from '../../config/journalConfig';
+import { HOLDING_BUCKETS, STRATEGY_DURATIONS } from '../../config/journalConfig';
 import type { TradeJournalEntry } from '../../types';
 import type { JournalMeta } from './journalMeta';
 
 export interface TradeRow {
   t: TradeJournalEntry;
   meta: JournalMeta;
-  /** Realized P&L converted to CAD. */
+  /** Realized P&L converted to CAD — the ONLY basis for every aggregate. */
   pnlCAD: number;
+  /** Realized P&L in the trade's own currency, for per-row display only. */
+  pnlNative: number;
+  /** Percent units (90.95 = +90.95%), derived from prices where available. */
   pnlPct: number | null;
+  pnlPctSource: 'prices' | 'stored' | 'none';
   entryDate: string;
   exitDate: string | null;
   daysHeld: number | null;
@@ -28,6 +32,29 @@ export interface TradeRow {
   rMultiple: number | null;
   /** exit date earlier than entry date — flagged, never auto-corrected */
   invalidDates: boolean;
+  /** true when this row can take part in date-dependent analytics */
+  dateValid: boolean;
+}
+
+/**
+ * P&L % from actual prices, which is authoritative. The stored
+ * realized_pnl_pct field has been written in inconsistent units across the
+ * journal's history (some decimal, some percent), so it is only a fallback and
+ * is normalised on the way in.
+ */
+export function computePnlPct(t: TradeJournalEntry): { pct: number | null; source: TradeRow['pnlPctSource'] } {
+  const exit = t.avg_exit_price ?? t.exit_price ?? null;
+  if (t.entry_price > 0 && exit != null && exit > 0) {
+    return { pct: ((exit - t.entry_price) / t.entry_price) * 100, source: 'prices' };
+  }
+  const stored = t.realized_pnl_pct;
+  if (stored != null && isFinite(stored)) {
+    // Values written by this app are decimals (0.9095 = +90.95%). Anything
+    // beyond ±1.5 is already in percent units.
+    const pct = Math.abs(stored) <= 1.5 ? stored * 100 : stored;
+    return { pct, source: 'stored' };
+  }
+  return { pct: null, source: 'none' };
 }
 
 export interface CoreStats {
@@ -91,20 +118,47 @@ export function buildRows(
       if (totalRisk > 0) rMultiple = round2(pnlNative / totalRisk);
     }
 
+    const invalidDates = hasInvalidDates(t.date_of_buy, exitDate);
+    const { pct, source } = computePnlPct(t);
+
     return {
       t, meta: metaMap[t.id] ?? {},
-      pnlCAD, pnlPct: t.realized_pnl_pct ?? null,
+      pnlCAD, pnlNative, pnlPct: pct, pnlPctSource: source,
       entryDate: t.date_of_buy, exitDate,
-      daysHeld: daysHeld != null && daysHeld >= 0 ? daysHeld : null,
+      daysHeld: !invalidDates && daysHeld != null && daysHeld >= 0 ? daysHeld : null,
       outcome, rMultiple,
-      invalidDates: hasInvalidDates(t.date_of_buy, exitDate),
+      invalidDates,
+      // A closed trade needs both dates, in the right order, to be usable in
+      // any time-based analytic.
+      dateValid: !invalidDates && !!exitDate && daysHeld != null && daysHeld >= 0,
     };
   });
 }
 
-/** Core statistics over CLOSED rows only. */
+/**
+ * THE canonical dataset. Every closed-trade analytic derives from this one
+ * collection so no widget can filter or normalise trades differently.
+ */
+export function closedTradesForAnalytics(rows: TradeRow[]): TradeRow[] {
+  return rows.filter(r => r.t.status === 'CLOSED');
+}
+
+/** The date-valid subset, for time-dependent analytics only. */
+export function dateValidTrades(rows: TradeRow[]): TradeRow[] {
+  return closedTradesForAnalytics(rows).filter(r => r.dateValid);
+}
+
+export interface Coverage { used: number; total: number; excluded: number }
+
+export function dateCoverage(rows: TradeRow[]): Coverage {
+  const closed = closedTradesForAnalytics(rows);
+  const valid = closed.filter(r => r.dateValid);
+  return { used: valid.length, total: closed.length, excluded: closed.length - valid.length };
+}
+
+/** Core statistics over the canonical closed-trade dataset. */
 export function computeCoreStats(rows: TradeRow[]): CoreStats {
-  const closed = rows.filter(r => r.t.status === 'CLOSED');
+  const closed = closedTradesForAnalytics(rows);
   const wins = closed.filter(r => r.outcome === 'WIN');
   const losses = closed.filter(r => r.outcome === 'LOSS');
   const breakeven = closed.filter(r => r.outcome === 'BREAKEVEN');
@@ -147,10 +201,19 @@ export function computeCoreStats(rows: TradeRow[]): CoreStats {
 
 export interface Segment extends CoreStats { key: string }
 
-export function segmentBy(rows: TradeRow[], keyOf: (r: TradeRow) => string | null): Segment[] {
+/**
+ * Segment the canonical dataset. `fallbackKey` keeps rows with no value in the
+ * result (e.g. "Unclassified") so segment totals always reconcile with the
+ * overall figure instead of silently dropping trades.
+ */
+export function segmentBy(
+  rows: TradeRow[],
+  keyOf: (r: TradeRow) => string | null,
+  fallbackKey?: string,
+): Segment[] {
   const groups = new Map<string, TradeRow[]>();
-  for (const r of rows.filter(x => x.t.status === 'CLOSED')) {
-    const k = keyOf(r);
+  for (const r of closedTradesForAnalytics(rows)) {
+    const k = keyOf(r) ?? fallbackKey ?? null;
     if (!k) continue;
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k)!.push(r);
@@ -197,8 +260,9 @@ export interface HoldingStats {
   medianLosers: number | null;
 }
 
+/** Date-dependent — uses only the date-valid subset. */
 export function computeHoldingStats(rows: TradeRow[]): HoldingStats {
-  const closed = rows.filter(r => r.t.status === 'CLOSED' && r.daysHeld != null);
+  const closed = dateValidTrades(rows);
   const d = (rs: TradeRow[]) => rs.map(r => r.daysHeld!) as number[];
   const winners = closed.filter(r => r.outcome === 'WIN');
   const losers = closed.filter(r => r.outcome === 'LOSS');
@@ -253,8 +317,10 @@ export interface EquityPoint {
  * always order identically.
  */
 export function computeEquityCurve(rows: TradeRow[]): EquityPoint[] {
-  const closed = rows
-    .filter(r => r.t.status === 'CLOSED')
+  // Date-invalid trades cannot be placed on a timeline, so they are excluded
+  // rather than inserted at an arbitrary point. Their P&L is reported
+  // separately via excludedFromCurveCAD().
+  const closed = dateValidTrades(rows)
     .sort((a, b) => {
       const da = a.exitDate ?? a.entryDate;
       const db = b.exitDate ?? b.entryDate;
@@ -307,9 +373,10 @@ export function computeDrawdown(curve: EquityPoint[]): DrawdownStats {
 
 export interface MonthlyPoint { month: string; pnl: number; wins: number; losses: number }
 
+/** P&L realized in a month is attributed to that month's EXIT date. */
 export function computeMonthly(rows: TradeRow[]): MonthlyPoint[] {
   const map = new Map<string, MonthlyPoint>();
-  for (const r of rows.filter(x => x.t.status === 'CLOSED')) {
+  for (const r of dateValidTrades(rows)) {
     const key = (r.exitDate ?? r.entryDate).slice(0, 7);
     const cur = map.get(key) ?? { month: key, pnl: 0, wins: 0, losses: 0 };
     cur.pnl += r.pnlCAD;
@@ -326,27 +393,131 @@ export function computeMonthly(rows: TradeRow[]): MonthlyPoint[] {
 
 export interface JournalDiagnostic { label: string; expected: number; actual: number; diff: number }
 
+/** P&L of closed trades excluded from the time-ordered curve (bad dates). */
+export function excludedFromCurveCAD(rows: TradeRow[]): number {
+  return closedTradesForAnalytics(rows)
+    .filter(r => !r.dateValid)
+    .reduce((s, r) => s + r.pnlCAD, 0);
+}
+
 export function validateJournal(rows: TradeRow[], stats: CoreStats, curve: EquityPoint[], monthly: MonthlyPoint[]): JournalDiagnostic[] {
   const out: JournalDiagnostic[] = [];
   const push = (label: string, expected: number, actual: number, tol = 0.05) => {
     if (Math.abs(actual - expected) > tol) out.push({ label, expected, actual, diff: actual - expected });
   };
+  const closed = closedTradesForAnalytics(rows);
+  const excluded = excludedFromCurveCAD(rows);
+
   push('Gross wins + gross losses = net realized P&L', stats.netPnlCAD, stats.grossWinsCAD + stats.grossLossesCAD);
-  push('Sum of closed trade P&L = net realized P&L',
-    stats.netPnlCAD, rows.filter(r => r.t.status === 'CLOSED').reduce((s, r) => s + r.pnlCAD, 0));
-  if (curve.length > 0) push('Cumulative curve final value = net realized P&L', stats.netPnlCAD, curve[curve.length - 1].cum);
-  push('Monthly P&L total = net realized P&L', stats.netPnlCAD, monthly.reduce((s, m) => s + m.pnl, 0));
+  push('Sum of closed trade P&L = net realized P&L', stats.netPnlCAD, closed.reduce((s, r) => s + r.pnlCAD, 0));
   push('Win + loss + breakeven = closed trades', stats.trades, stats.wins + stats.losses + stats.breakeven, 0);
+
+  // Time-ordered series legitimately exclude date-invalid trades, so they
+  // reconcile against net P&L MINUS that excluded amount.
+  const timeSeriesExpected = stats.netPnlCAD - excluded;
+  if (curve.length > 0) push('Cumulative curve final value = date-valid realized P&L', timeSeriesExpected, curve[curve.length - 1].cum);
+  push('Monthly P&L total = date-valid realized P&L', timeSeriesExpected, monthly.reduce((s, m) => s + m.pnl, 0));
+
+  // Segment totals must account for every closed trade
+  const accountTotal = segmentBy(rows, r => r.t.account).reduce((s, x) => s + x.netPnlCAD, 0);
+  push('Account P&L total = net realized P&L', stats.netPnlCAD, accountTotal);
+  const strategyTotal = segmentBy(rows, r => r.t.strategy || null, UNCLASSIFIED).reduce((s, x) => s + x.netPnlCAD, 0);
+  push('Strategy P&L total = net realized P&L', stats.netPnlCAD, strategyTotal);
+
   return out;
+}
+
+export const UNCLASSIFIED = 'Unclassified';
+
+/** Everything needed to prove the page's numbers tie out. */
+export interface Reconciliation {
+  closedTrades: number;
+  wins: number; losses: number; breakeven: number;
+  grossWinsCAD: number; grossLossesCAD: number; netPnlCAD: number;
+  avgWinCAD: number | null; avgLossCAD: number | null;
+  profitFactor: number | null; payoffRatio: number | null; expectancyCAD: number | null;
+  accountTotalCAD: number; strategyTotalCAD: number;
+  monthlyTotalCAD: number; finalCumulativeCAD: number;
+  excludedFromCurveCAD: number;
+  dateCoverage: Coverage;
+  diagnostics: JournalDiagnostic[];
+  verified: boolean;
+}
+
+export function buildReconciliation(rows: TradeRow[]): Reconciliation {
+  const stats = computeCoreStats(rows);
+  const curve = computeEquityCurve(rows);
+  const monthly = computeMonthly(rows);
+  const diagnostics = validateJournal(rows, stats, curve, monthly);
+
+  const rec: Reconciliation = {
+    closedTrades: stats.trades,
+    wins: stats.wins, losses: stats.losses, breakeven: stats.breakeven,
+    grossWinsCAD: stats.grossWinsCAD, grossLossesCAD: stats.grossLossesCAD, netPnlCAD: stats.netPnlCAD,
+    avgWinCAD: stats.avgWinCAD, avgLossCAD: stats.avgLossCAD,
+    profitFactor: stats.profitFactor, payoffRatio: stats.payoffRatio, expectancyCAD: stats.expectancyCAD,
+    accountTotalCAD: segmentBy(rows, r => r.t.account).reduce((s, x) => s + x.netPnlCAD, 0),
+    strategyTotalCAD: segmentBy(rows, r => r.t.strategy || null, UNCLASSIFIED).reduce((s, x) => s + x.netPnlCAD, 0),
+    monthlyTotalCAD: monthly.reduce((s, m) => s + m.pnl, 0),
+    finalCumulativeCAD: curve.length > 0 ? curve[curve.length - 1].cum : 0,
+    excludedFromCurveCAD: excludedFromCurveCAD(rows),
+    dateCoverage: dateCoverage(rows),
+    diagnostics,
+    verified: diagnostics.length === 0,
+  };
+
+  if (import.meta.env?.DEV) {
+    /* eslint-disable no-console */
+    console.groupCollapsed(`[journal] reconciliation — ${rec.verified ? 'VERIFIED' : `${diagnostics.length} MISMATCH(ES)`}`);
+    console.table({
+      'closed trades': rec.closedTrades,
+      'wins / losses / breakeven': `${rec.wins} / ${rec.losses} / ${rec.breakeven}`,
+      'gross wins CAD': rec.grossWinsCAD.toFixed(2),
+      'gross losses CAD': rec.grossLossesCAD.toFixed(2),
+      'net realized CAD': rec.netPnlCAD.toFixed(2),
+      'profit factor': rec.profitFactor?.toFixed(4) ?? 'n/a',
+      'payoff ratio': rec.payoffRatio?.toFixed(4) ?? 'n/a',
+      'expectancy CAD': rec.expectancyCAD?.toFixed(2) ?? 'n/a',
+      'account total CAD': rec.accountTotalCAD.toFixed(2),
+      'strategy total CAD': rec.strategyTotalCAD.toFixed(2),
+      'monthly total CAD': rec.monthlyTotalCAD.toFixed(2),
+      'final cumulative CAD': rec.finalCumulativeCAD.toFixed(2),
+      'excluded from curve CAD': rec.excludedFromCurveCAD.toFixed(2),
+      'date coverage': `${rec.dateCoverage.used}/${rec.dateCoverage.total}`,
+    });
+    if (diagnostics.length > 0) console.table(diagnostics);
+    console.groupEnd();
+    /* eslint-enable no-console */
+  }
+
+  return rec;
 }
 
 // ── deterministic insights ───────────────────────────────────────────────────
 
 export interface Insight { label: string; value: string; detail?: string }
 
-export function computeInsights(rows: TradeRow[], holding: HoldingStats): Insight[] {
+/**
+ * Flags a trade whose actual hold falls outside its strategy's expected window.
+ * Informational only — the user's tag is never overwritten.
+ */
+export function strategyDurationFlag(r: TradeRow): string | null {
+  if (!r.dateValid || r.daysHeld == null) return null;
+  const window = STRATEGY_DURATIONS[r.t.strategy];
+  if (!window) return null;
+  if (r.daysHeld > window.maxDays) return `Held ${r.daysHeld}d — outside "${r.t.strategy}" duration`;
+  if (r.daysHeld < window.minDays) return `Held ${r.daysHeld}d — shorter than "${r.t.strategy}" duration`;
+  return null;
+}
+
+export function computeInsights(rows: TradeRow[], holding: HoldingStats, coverage?: Coverage): Insight[] {
   const out: Insight[] = [];
   const MIN_TRADES = 3;   // don't draw conclusions from one or two trades
+  // Holding-period conclusions need enough date-valid data to mean anything
+  const coverageNote = coverage && coverage.excluded > 0
+    ? `Based on ${coverage.used} date-valid trades`
+    : undefined;
+  const holdingUsable = !coverage || coverage.used >= MIN_TRADES;
 
   const strategies = segmentBy(rows, r => r.t.strategy || null).filter(s => s.trades >= MIN_TRADES);
   if (strategies.length > 0) {
@@ -365,15 +536,16 @@ export function computeInsights(rows: TradeRow[], holding: HoldingStats): Insigh
     }
   }
 
-  if (holding.avgWinners != null && holding.avgLosers != null) {
-    out.push({ label: 'Average winner held', value: `${holding.avgWinners.toFixed(0)} days` });
-    out.push({ label: 'Average loser held', value: `${holding.avgLosers.toFixed(0)} days` });
+  if (holdingUsable && holding.avgWinners != null && holding.avgLosers != null) {
+    out.push({ label: 'Average winner held', value: `${holding.avgWinners.toFixed(0)} days`, detail: coverageNote });
+    out.push({ label: 'Average loser held', value: `${holding.avgLosers.toFixed(0)} days`, detail: coverageNote });
     const gap = holding.avgWinners - holding.avgLosers;
     if (Math.abs(gap) >= 3) {
       out.push({
         label: gap > 0 ? 'You hold winners longer' : 'You hold losers longer',
         value: `${Math.abs(gap).toFixed(0)} day difference`,
-        detail: gap > 0 ? 'Letting winners run' : 'Cutting winners faster than losers',
+        detail: [gap > 0 ? 'Letting winners run' : 'Cutting winners faster than losers', coverageNote]
+          .filter(Boolean).join(' · '),
       });
     }
   }

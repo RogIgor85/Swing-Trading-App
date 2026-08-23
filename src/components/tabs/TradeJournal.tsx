@@ -16,7 +16,8 @@ import type { JournalMeta } from '../../lib/journal/journalMeta';
 import {
   buildRows, computeCoreStats, computeHoldingStats, computeExtremes,
   computeEquityCurve, computeDrawdown, computeMonthly, segmentBy,
-  holdingBucketOf, rotationContextOf, computeInsights, validateJournal,
+  holdingBucketOf, rotationContextOf, computeInsights, buildReconciliation,
+  dateCoverage, strategyDurationFlag, UNCLASSIFIED,
   inDateRange, hasInvalidDates,
 } from '../../lib/journal/journalStats';
 import type { Segment } from '../../lib/journal/journalStats';
@@ -284,14 +285,17 @@ export default function TradeJournal() {
   const equityCurve   = useMemo(() => computeEquityCurve(rows), [rows]);
   const drawdown      = useMemo(() => computeDrawdown(equityCurve), [equityCurve]);
   const monthlyData   = useMemo(() => computeMonthly(rows), [rows]);
-  const byStrategy    = useMemo(() => segmentBy(rows, r => r.t.strategy || null), [rows]);
+  // Strategy segments keep unclassified trades so totals reconcile
+  const byStrategy    = useMemo(() => segmentBy(rows, r => r.t.strategy || null, UNCLASSIFIED), [rows]);
   const byAccount     = useMemo(() => segmentBy(rows, r => r.t.account), [rows]);
+  // Holding buckets are date-dependent — only date-valid trades qualify
   const byHolding     = useMemo(() => segmentBy(rows, r => holdingBucketOf(r.daysHeld)), [rows]);
   const byRotation    = useMemo(() => segmentBy(rows, rotationContextOf), [rows]);
-  const insights      = useMemo(() => computeInsights(rows, holdingStats), [rows, holdingStats]);
-  const diagnostics   = useMemo(
-    () => validateJournal(rows, stats, equityCurve, monthlyData),
-    [rows, stats, equityCurve, monthlyData]);
+  const coverage      = useMemo(() => dateCoverage(rows), [rows]);
+  const insights      = useMemo(() => computeInsights(rows, holdingStats, coverage), [rows, holdingStats, coverage]);
+  const reconciliation = useMemo(() => buildReconciliation(rows), [rows]);
+  const diagnostics   = reconciliation.diagnostics;
+  const excludedPnl   = reconciliation.excludedFromCurveCAD;
   const invalidDateRows = useMemo(() => allRows.filter(r => r.invalidDates), [allRows]);
 
   // Kept for the existing markup below
@@ -363,6 +367,26 @@ export default function TradeJournal() {
         <span className="text-xs text-zinc-600 ml-auto" title={CURRENCY_HELP}>
           All figures in CAD ⓘ
         </span>
+        {/* Data quality status — informational, never alarmist */}
+        <span
+          title={[
+            reconciliation.verified
+              ? 'P&L analytics reconcile: gross wins + gross losses = net realized P&L, and account, strategy, monthly and cumulative totals all tie out.'
+              : 'One or more totals do not reconcile — see the detail below.',
+            coverage.excluded > 0
+              ? `Holding-period analytics use ${coverage.used} of ${coverage.total} closed trades; ${coverage.excluded} excluded for invalid dates.`
+              : 'All closed trades have valid dates.',
+          ].join('\n\n')}
+          className={`text-xs px-2 py-0.5 rounded-full border cursor-help ${
+            reconciliation.verified && coverage.excluded === 0
+              ? 'bg-emerald-900/30 text-emerald-400 border-emerald-800'
+              : reconciliation.verified
+                ? 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                : 'bg-amber-900/30 text-amber-400 border-amber-800'}`}>
+          {reconciliation.verified && coverage.excluded === 0 ? 'DATA VERIFIED'
+            : reconciliation.verified ? `P&L VERIFIED · ${coverage.excluded} DATE ISSUE${coverage.excluded > 1 ? 'S' : ''}`
+            : 'DATA ISSUES'}
+        </span>
       </div>
 
       {/* ── Stats bar ────────────────────────────────────────────────────────── */}
@@ -426,37 +450,54 @@ export default function TradeJournal() {
         ))}
       </div>
 
-      {/* Best / worst detail */}
-      {extremes.bestByPct && (
-        <div className="card py-2.5 flex flex-wrap gap-x-6 gap-y-1 text-xs">
+      {/* Best / worst — dollar and percent are separate trades */}
+      {extremes.bestByDollar && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           {[
-            { label: 'Best $', r: extremes.bestByDollar },
-            { label: 'Best %', r: extremes.bestByPct },
-            { label: 'Worst $', r: extremes.worstByDollar },
-            { label: 'Worst %', r: extremes.worstByPct },
-          ].filter(x => x.r).map(({ label, r }) => (
-            <span key={label} className="text-zinc-500">
-              {label}: <span className="font-mono text-blue-400">{r!.t.ticker}</span>{' '}
-              <span className={r!.pnlCAD >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                {r!.pnlCAD >= 0 ? '+' : ''}{fmtCurrency(r!.pnlCAD)}
-              </span>
-              {r!.pnlPct != null && <span className="text-zinc-600"> ({fmtPct(r!.pnlPct)})</span>}
-            </span>
+            { label: 'Best $ Trade',  r: extremes.bestByDollar,  tone: 'text-emerald-400' },
+            { label: 'Best % Trade',  r: extremes.bestByPct,     tone: 'text-emerald-400' },
+            { label: 'Worst $ Trade', r: extremes.worstByDollar, tone: 'text-red-400' },
+            { label: 'Worst % Trade', r: extremes.worstByPct,    tone: 'text-red-400' },
+          ].map(({ label, r, tone }) => (
+            <div key={label} className="card py-3">
+              <div className="text-xs text-zinc-500 mb-1">{label}</div>
+              {r ? (
+                <>
+                  <div className="font-mono text-sm text-blue-400">{r.t.ticker}</div>
+                  <div className={`text-base font-bold tabular-nums ${tone}`}>
+                    {r.pnlCAD >= 0 ? '+' : ''}{fmtCurrency(r.pnlCAD)}
+                  </div>
+                  <div className={`text-xs tabular-nums ${r.pnlPct != null && r.pnlPct >= 0 ? 'text-emerald-600' : 'text-red-600'}`}
+                    title={r.pnlPctSource === 'prices'
+                      ? 'Calculated from entry and exit prices'
+                      : r.pnlPctSource === 'stored' ? 'From the stored percentage field' : 'No percentage available'}>
+                    {r.pnlPct != null ? `${r.pnlPct >= 0 ? '+' : ''}${r.pnlPct.toFixed(2)}%` : '—'}
+                  </div>
+                </>
+              ) : <div className="text-zinc-600 text-sm">—</div>}
+            </div>
           ))}
         </div>
       )}
 
       {/* Data integrity */}
       {(diagnostics.length > 0 || invalidDateRows.length > 0) && (
-        <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl px-4 py-2.5 text-xs text-amber-400 space-y-0.5">
+        <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl px-4 py-2.5 text-xs text-amber-400 space-y-1">
           {diagnostics.map((d, i) => (
             <div key={i}>⚠ {d.label}: expected {fmtCurrency(d.expected)}, got {fmtCurrency(d.actual)}</div>
           ))}
           {invalidDateRows.length > 0 && (
-            <div>
-              ⚠ {invalidDateRows.length} trade{invalidDateRows.length > 1 ? 's have' : ' has'} an exit date before the entry date
-              ({invalidDateRows.map(r => r.t.ticker).join(', ')}) — flagged for review, not modified.
-            </div>
+            <>
+              <div>
+                ⚠ {invalidDateRows.length} trade{invalidDateRows.length > 1 ? 's have' : ' has'} an exit date before the entry date
+                ({invalidDateRows.map(r => r.t.ticker).join(', ')}) — flagged for review, not modified.
+              </div>
+              <div className="text-zinc-400">
+                These are excluded from holding-period, monthly and cumulative analytics
+                {Math.abs(excludedPnl) > 0.01 && <> ({fmtCurrency(excludedPnl)} of realized P&amp;L)</>},
+                but still count in Win Rate, P&amp;L, Profit Factor and account/strategy totals.
+              </div>
+            </>
           )}
         </div>
       )}
@@ -526,11 +567,11 @@ export default function TradeJournal() {
               </div>
               <div className="flex justify-between text-xs">
                 <span className="text-zinc-500">Total Wins $</span>
-                <span className="text-emerald-400 tabular-nums">+{fmtCurrency(wins.reduce((s, t) => s + (t.realized_pnl ?? 0), 0))}</span>
+                <span className="text-emerald-400 tabular-nums">+{fmtCurrency(stats.grossWinsCAD)}</span>
               </div>
               <div className="flex justify-between text-xs">
                 <span className="text-zinc-500">Total Losses $</span>
-                <span className="text-red-400 tabular-nums">{fmtCurrency(losses.reduce((s, t) => s + (t.realized_pnl ?? 0), 0))}</span>
+                <span className="text-red-400 tabular-nums">{fmtCurrency(stats.grossLossesCAD)}</span>
               </div>
             </div>
 
@@ -631,12 +672,19 @@ export default function TradeJournal() {
           {([
             { title: 'Performance by Strategy', rows: byStrategy, empty: 'No strategies recorded yet — set a Strategy on your trades to compare them.' },
             { title: 'Performance by Account',  rows: byAccount,  empty: 'No account data.' },
-            { title: 'Performance by Holding Period', rows: byHolding, empty: 'Needs entry and exit dates to bucket trades.' },
+            { title: 'Performance by Holding Period', rows: byHolding,
+              empty: 'Needs entry and exit dates to bucket trades.',
+              note: coverage.excluded > 0
+                ? `Holding-period coverage: ${coverage.used} / ${coverage.total} trades · ${coverage.excluded} excluded for invalid dates`
+                : `Holding-period coverage: ${coverage.used} / ${coverage.total} trades` },
             { title: 'Performance by Rotation Context', rows: byRotation,
               empty: 'No sector snapshots captured yet. New trades store the sector conditions at entry; historical trades show N/A.' },
-          ] as Array<{ title: string; rows: Segment[]; empty: string }>).map(({ title, rows: segs, empty }) => (
+          ] as Array<{ title: string; rows: Segment[]; empty: string; note?: string }>).map(({ title, rows: segs, empty, note }) => (
             <div key={title} className="card overflow-hidden p-0">
-              <h2 className="text-sm font-semibold text-zinc-100 px-4 pt-4 pb-3">{title}</h2>
+              <div className="px-4 pt-4 pb-3">
+                <h2 className="text-sm font-semibold text-zinc-100">{title}</h2>
+                {note && <div className="text-xs text-zinc-600 mt-0.5">{note}</div>}
+              </div>
               {segs.length === 0 ? (
                 <p className="text-zinc-600 text-xs px-4 pb-4">{empty}</p>
               ) : (
@@ -886,7 +934,14 @@ export default function TradeJournal() {
                         return d != null ? `${d}d` : '—';
                       })()}
                     </td>
-                    <td className="td text-zinc-500 text-xs truncate max-w-[110px]" title={t.strategy}>{t.strategy || '—'}</td>
+                    <td className="td text-zinc-500 text-xs truncate max-w-[110px]" title={t.strategy}>
+                      {t.strategy || <span className="text-zinc-700">Unclassified</span>}
+                      {(() => {
+                        const r = rowByTradeId.get(t.id);
+                        const flag = r ? strategyDurationFlag(r) : null;
+                        return flag ? <span className="text-amber-500 ml-1" title={flag}>⚑</span> : null;
+                      })()}
+                    </td>
                     <td className="td tabular-nums">
                       {t.avg_exit_price ? fmtCurrency(t.avg_exit_price) : (
                         t.status === 'OPEN' && livePrices[t.ticker]
